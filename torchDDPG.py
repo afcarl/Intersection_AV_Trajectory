@@ -1,4 +1,3 @@
-import tensorflow as tf
 import numpy as np
 import os
 import shutil
@@ -11,7 +10,7 @@ from torch.nn import init
 
 class SumTree(object):
     """
-    This SumTree code is modified version and the original code is from: 
+    This SumTree code is modified version and the original code is from:
     https://github.com/jaara/AI-blog/blob/master/SumTree.py
 
     Story the data with it priority in tree and data frameworks.
@@ -20,18 +19,18 @@ class SumTree(object):
 
     def __init__(self, capacity):
         self.capacity = capacity  # for all priority values
-        self.tree = np.zeros(2 * capacity - 1)
+        self.tree = np.zeros(2 * capacity - 1, dtype=np.float32)
         # [--------------Parent nodes-------------][-------leaves to recode priority-------]
         #             size: capacity - 1                       size: capacity
         self.data = np.zeros(capacity, dtype=object)  # for all transitions
         # [--------------data frame-------------]
         #             size: capacity
 
-    def add_new_priority(self, p, data):
+    def add(self, p, data):
         for d in data:
-            leaf_idx = self.data_pointer + self.capacity - 1
+            tree_idx = self.data_pointer + self.capacity - 1
             self.data[self.data_pointer] = d  # update data_frame
-            self.update(leaf_idx, p)  # update tree_frame
+            self.update(tree_idx, p)  # update tree_frame, add this p (maxp) for all transitions
 
             self.data_pointer += 1
             if self.data_pointer >= self.capacity:  # replace when exceed the capacity
@@ -39,23 +38,13 @@ class SumTree(object):
 
     def update(self, tree_idx, p):
         change = p - self.tree[tree_idx]
-
         self.tree[tree_idx] = p
-        self._propagate_change(tree_idx, change)
+        # then propagate the change through tree
+        while tree_idx != 0:    # this method is faster than the recursive loop in the reference code
+            tree_idx = (tree_idx - 1) // 2
+            self.tree[tree_idx] += change
 
-    def _propagate_change(self, tree_idx, change):
-        """change the sum of priority value in all parent nodes"""
-        parent_idx = (tree_idx - 1) // 2
-        self.tree[parent_idx] += change
-        if parent_idx != 0:
-            self._propagate_change(parent_idx, change)
-
-    def get_leaf(self, lower_bound):
-        leaf_idx = self._retrieve(lower_bound)  # search the max leaf priority based on the lower_bound
-        data_idx = leaf_idx - self.capacity + 1
-        return [leaf_idx, self.tree[leaf_idx], self.data[data_idx]]
-
-    def _retrieve(self, lower_bound, parent_idx=0):
+    def get_leaf(self, v):
         """
         Tree structure and array storage:
 
@@ -69,21 +58,25 @@ class SumTree(object):
         Array type for storing:
         [0,1,2,3,4,5,6]
         """
-        left_child_idx = 2 * parent_idx + 1
-        right_child_idx = left_child_idx + 1
+        parent_idx = 0
+        while True:     # the while loop is faster than the method in the reference code
+            cl_idx = 2 * parent_idx + 1         # this leaf's left and right kids
+            cr_idx = cl_idx + 1
+            if cl_idx >= len(self.tree):        # reach bottom, end search
+                leaf_idx = parent_idx
+                break
+            else:       # downward search, always search for a higher priority node
+                if v <= self.tree[cl_idx]:
+                    parent_idx = cl_idx
+                else:
+                    v -= self.tree[cl_idx]
+                    parent_idx = cr_idx
 
-        if left_child_idx >= len(self.tree):  # end search when no more child
-            return parent_idx
-
-        if self.tree[left_child_idx] == self.tree[right_child_idx]:
-            return self._retrieve(lower_bound, np.random.choice([left_child_idx, right_child_idx]))
-        if lower_bound <= self.tree[left_child_idx]:  # downward search, always search for a higher priority node
-            return self._retrieve(lower_bound, left_child_idx)
-        else:
-            return self._retrieve(lower_bound - self.tree[left_child_idx], right_child_idx)
+        data_idx = leaf_idx - self.capacity + 1
+        return leaf_idx, self.tree[leaf_idx], self.data[data_idx]
 
     @property
-    def root_priority(self):
+    def total_p(self):
         return self.tree[0]  # the root
 
 
@@ -96,46 +89,39 @@ class Memory(object):  # stored as ( s, a, r, s_ ) in SumTree
     alpha = 0.6  # [0~1] convert the importance of TD error to priority
     beta = 0.4  # importance-sampling, from initial value increasing to 1
     beta_increment_per_sampling = 0.001
-    abs_err_upper = 1  # clipped abs error
+    abs_err_upper = 1.  # clipped abs error
 
     def __init__(self, capacity):
         self.tree = SumTree(capacity)
 
     def store(self, transition):
         max_p = np.max(self.tree.tree[-self.tree.capacity:])
-        if max_p == 0:
+        if max_p == 0:  # add maxp for all transitions
             max_p = self.abs_err_upper
-        self.tree.add_new_priority(max_p, transition)   # set the max p for new p
+        self.tree.add(max_p, transition)   # set the max p for new p
 
     def sample(self, n):
-        batch_idx, batch_memory, ISWeights = [None] * n, [None] * n, [None] * n
-        segment = self.tree.root_priority / n
-        self.beta = np.min([1, self.beta + self.beta_increment_per_sampling])  # max = 1
+        b_idx, b_memory, ISWeights = np.empty((n,), dtype=np.int32), np.empty((n, self.tree.data[0].size)), np.empty((n, 1))
+        pri_seg = self.tree.total_p / n       # priority segment
+        self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])  # max = 1
 
-        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.root_priority
-        maxiwi = np.power(self.tree.capacity * min_prob, -self.beta)  # for later normalizing ISWeights
+        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_p     # for later calculate ISweight
         for i in range(n):
-            a = segment * i
-            b = segment * (i + 1)
-            lower_bound = np.random.uniform(a, b)
-            idx, p, data = self.tree.get_leaf(lower_bound)
-            prob = p / self.tree.root_priority
-            ISWeights[i] = self.tree.capacity * prob
-            batch_idx[i] = idx
-            batch_memory[i] = data
+            a, b = pri_seg * i, pri_seg * (i + 1)
+            v = np.random.uniform(a, b)
+            idx, p, data = self.tree.get_leaf(v)
+            prob = p / self.tree.total_p
+            ISWeights[i, 0] = np.power(prob/min_prob, -self.beta)
+            b_idx[i], b_memory[i, :] = idx, data
 
-        ISWeights = np.vstack(ISWeights)
-        ISWeights = np.power(ISWeights, -self.beta) / maxiwi  # normalize
-        return batch_idx, np.vstack(batch_memory), ISWeights
+        return b_idx, b_memory, ISWeights
 
-    def update(self, idx, error):
-        p = self._get_priority(error)
-        self.tree.update(idx, p)
-
-    def _get_priority(self, error):
-        error += self.epsilon  # avoid 0
-        clipped_error = np.clip(error, 0, self.abs_err_upper)
-        return np.power(clipped_error, self.alpha)
+    def batch_update(self, tree_idx, abs_errors):
+        abs_errors += self.epsilon  # convert to abs and avoid 0
+        clipped_errors = np.minimum(abs_errors, self.abs_err_upper)
+        ps = np.power(clipped_errors, self.alpha)
+        for ti, p in zip(tree_idx, ps):
+            self.tree.update(ti, p)
 
 
 def init_w_b(layer):
@@ -153,7 +139,7 @@ class Actor(nn.Module):
         self.fc2 = nn.Linear(layers[0], layers[1])
         self.out = nn.Linear(layers[1], a_dim)
         [init_w_b(l) for l in [self.fc1, self.fc2, self.out]]
-        self.ac1 = nn.LeakyReLU()
+        self.ac1 = nn.ReLU()
         self.tanh = nn.Tanh()
         self.scale = (self.a_bound[1] - self.a_bound[0]) / 2
         self.shift = self.a_bound[1] - self.scale
@@ -178,7 +164,7 @@ class Critic(nn.Module):
         self.fc2 = nn.Linear(layers[0], layers[1])
         self.out = nn.Linear(layers[1], 1)
         [init_w_b(l) for l in [self.fc2, self.out]]
-        self.ac1 = nn.LeakyReLU()
+        self.ac1 = nn.ReLU()
 
     def forward(self, s, a):
         w1x = torch.mm(a, self.w1a) + torch.mm(s, self.w1s)
@@ -192,7 +178,8 @@ class DDPG(object):
     def __init__(self,
                  s_dim, a_dim, a_bound,
                  a_lr=0.001, a_replace_iter=600,
-                 c_lr=0.001, c_replace_iter=500, gamma=0.9,
+                 c_lr=0.001, c_replace_iter=500,
+                 tau=0.01, gamma=0.9,
                  memory_capacity=5000, batch_size=64,
                  train={'train': True, 'save_iter': 10000, 'load_point': 400},
                  model_dir='./torch_models',
@@ -201,7 +188,8 @@ class DDPG(object):
         self.s_dim, self.a_dim, self.a_bound = s_dim, a_dim, a_bound
         self.a_replace_iter = a_replace_iter
         self.c_replace_iter = c_replace_iter
-        self.replace_counter = 0
+        self.learn_counter = 0
+        self.tau = tau
         self.gamma = gamma
         self.model_dir = model_dir
         self.batch_size = batch_size
@@ -227,7 +215,7 @@ class DDPG(object):
 
     def learn(self):
         # hard replacement
-        self._check_rep_target()
+        self._soft_rep_target()
         self._check_save()
 
         indices = np.random.choice(self.memory_capacity, size=self.batch_size)
@@ -265,20 +253,18 @@ class DDPG(object):
 
     def _check_save(self):
         if self.train_['save_iter'] is not None:
-            if self.replace_counter % self.train_['save_iter'] == 0:
+            if self.learn_counter % self.train_['save_iter'] == 0:
                 self.save()
-                print('\nSaved model for point=%i\n' % self.replace_counter)
+                print('\nSaved model for point=%i\n' % self.learn_counter)
 
     def save(self):
         for net in self.all_nets:
-            torch.save(net.state_dict(), './torch_models/params%i_%s.pkl' % (self.replace_counter, net.name))  # save only the parameters
+            torch.save(net.state_dict(), './torch_models/params%i_%s.pkl' % (self.learn_counter, net.name))  # save only the parameters
 
-    def _check_rep_target(self):
-        if self.replace_counter % self.a_replace_iter == 0:
-            self.anet_.load_state_dict(self.anet.state_dict())
-        if self.replace_counter % self.c_replace_iter == 0:
-            self.cnet_.load_state_dict(self.cnet.state_dict())
-        self.replace_counter += 1
+    def _soft_rep_target(self):
+        for (aname, aparam), (cname, cparam) in zip(self.anet.state_dict().items(), self.cnet.state_dict().items()):
+            self.anet_.state_dict()[aname].copy_((1-self.tau)*self.anet_.state_dict()[aname] + self.tau*aparam)
+            self.cnet_.state_dict()[cname].copy_((1-self.tau)*self.cnet_.state_dict()[cname] + self.tau*cparam)
 
 
 class DDPGPrioritizedReplay(DDPG):
@@ -301,7 +287,7 @@ class DDPGPrioritizedReplay(DDPG):
 
     def learn(self):
         # hard replacement
-        self._check_rep_target()
+        self._soft_rep_target()
         self._check_save()
 
         tree_idx, bt, ISWeights = self.memory.sample(self.batch_size)
