@@ -8,87 +8,111 @@ pyglet.clock.set_fps_limit(1000)
 
 
 def convert2pixel(meter):
-    scale = 10
+    scale = 7
     pixel = meter * scale
     return pixel
 
 
 class Env(object):
-    action_bound = [-2, 2]
+    action_bound = [-3, 2]
     action_dim = 1
     state_dim = 6
     dt = 0.1    # driving refresh rate
     ave_headway = 2    # used for the interval of generate car
+    safe_t_gap = 0.6     # s, (gap/v)
     light_duration = {'red': 20., 'green': 20.}     # seconds
-    car_l = 4.
-    init_v = 60.    # km/h
-    car_num_limit = 150
-    max_p = 700
+    # safe_time_buffer = {'green_start': 2, 'green_end': -2}  # seconds   safety clip for green period
+    car_l = 5.      # m
+    max_v = 60. / 3.6    # m/s
+    car_num_limit = 200
+    max_p = 600     # meter
     light_p = max_p * .95
     viewer = None
 
     def __init__(self):
-        # position(m), velocity(m/s), passed_light, run_red, reward
-        self.car_info = np.zeros((self.car_num_limit, 5), dtype=np.float32)
+        # position(m), velocity(m/s), passed_light, reward
+        self.car_info = np.zeros(
+            self.car_num_limit,
+            np.dtype(dict(names=['p', 'v', 'pass_l', 'r'], formats=[np.float32, np.float32, np.bool, np.float32])))
+        self.car_gen_default = dict(p=0., v=0.9 * self.max_v, pass_l=False, r=0)
         self.t_gen = 0.  # counting time for generate car
         self.t_light = 0.  # counting time for light change
         self.is_red_light = True  # red phase
-        self.n_car_show = 0
+        self.ncs = 0        # n car show
 
     def step(self, action):
-        cars_show = self.car_info[:self.n_car_show]
-        pass_light_last_step = cars_show[:, 2].copy()
-        v_ = cars_show[:, 1] + action * self.dt  # action (n_car_show, )
-        v_ = v_.clip(min=0.)    # stop
-        cars_show[:, 0] += (cars_show[:, 1] + v_) / 2 * self.dt  # new position
-        cars_show[:, 1] = v_
-        cars_show[:, 2] = cars_show[:, 0] > self.light_p   # new state of passed_light
+        v = self.car_info['v'][:self.ncs]
+        v_ = np.maximum(v + action * self.dt, 0.)  # action (n_car_show, ) filter out negative speed
+        self.car_info['p'][:self.ncs] += (v + v_) / 2 * self.dt  # new position
+        v[:] = v_
+        self.car_info['pass_l'][0] = self.car_info['p'][0] > self.light_p   # new state of passed_light
 
         self._check_change_light()  # traffic light changes
-        t2r, t2g = self._get_t2r_and_t2g()  # time to red and green light
-        s = self._get_state(t2r, t2g, cars_show)  # [t2r_norm, t2g_norm, dist2light_norm, dx_norm, dv, v_norm]
-        r, done = self._get_r_and_done(s, pass_light_last_step, cars_show, t2r, t2g)
-        cars_show[:, -1] = r     # record reward for plotting on screen
-        return s, r, done,
+        s, dx, d2l = self._get_state_norm(return_dx_d2l=True)  # [t2r_norm, t2g_norm, dist2light_norm, dx_norm, dv, v_norm]
+        r, done = self._get_r_and_done(dx, d2l)
 
-    def update_s_(self, s_):
-        # check and changes state
-        s_ = self._check_gen_car(s_)  # check to generate car
-        s_ = self._check_rm_car(s_)  # check to remove who achieve the max_p
-        return s_
+        # assign r value in self.car_info
+        self.car_info['r'][:self.ncs] = r
+
+        # add or delete cars
+        new_s = self._gen_or_rm_car(s)  # check to generate car
+        return s, r, done, new_s
 
     def reset(self):
         self.t_gen = 0.  # counting time for generate car
+        self.ncs = 0     # n car show
+        for key in self.car_info.dtype.names:
+            v = 0. if key != 'pass_l' else False
+            self.car_info[key].fill(v)
         c = np.random.choice(['red', 'green'])
         self.t_light = np.random.uniform(0, self.light_duration[c])  # counting time for light change
         self.is_red_light = True if c == 'red' else False   # red phase
         if self.viewer is not None:
             self.viewer.light.colors = self.viewer.color[c] * 4
-        self.n_car_show = 0
-        self.car_info *= 0
-        self._check_gen_car()
-        s = self._get_state(*self._get_t2r_and_t2g(), self.car_info[:self.n_car_show])
+        s = self._gen_or_rm_car(orig_s=None)
         return s
+
+    def _gen_or_rm_car(self, orig_s=None):
+        car_changed = False
+        # generate car
+        if self.t_gen >= self.ave_headway or self.ncs == 0:
+            if self.ncs != 0: self.t_gen -= self.ave_headway
+            for key in self.car_gen_default:
+                self.car_info[key][self.ncs] = self.car_gen_default[key]
+            self.ncs += 1       # add one car
+            car_changed = True
+        self.t_gen += self.dt  # accumulate time
+
+        # remove car
+        if self.car_info['p'][0] >= self.max_p:
+            for k in self.car_info.dtype.names:
+                # self.car_info[k][0] *= 0
+                self.car_info[k] = np.roll(self.car_info[k], -1, axis=0)      # move the 1st row to last, keep its id in memory
+            self.ncs -= 1    # remove one car on the road
+            car_changed = True
+
+        if car_changed or (orig_s is None):
+            new_s = self._get_state_norm(return_dx_d2l=False)
+        else:
+            new_s = orig_s
+        return new_s
 
     def render(self):
         if self.viewer is None:
             self.viewer = Viewer(self.car_num_limit, self.max_p, self.light_p)
-
-        for i, car in enumerate(self.viewer.cars):
-            if i < self.n_car_show:
-                car.visible = True
-                car.update(self.car_info[i])
-            else:
-                car.visible = False
-                car.label.text = ''
-        self.viewer.render()
+        else:
+            if self.viewer.display_game:
+                for i, car in enumerate(self.viewer.cars):
+                    if i < self.ncs:
+                        car.visible = True
+                        car.update(self.car_info['p'][i], self.car_info['v'][i], self.car_info['r'][i])
+                    else:
+                        car.visible = False
+                        car.label.text = ''
+            self.viewer.render()
 
     def sample_action(self):    # action (n_car_show, )
-        # return np.zeros((self.n_car_show, ))
-        return np.random.uniform(*self.action_bound, self.n_car_show)
-
-    def set_fps(self, fps=10):
-        pyglet.clock.set_fps_limit(fps)
+        return np.random.uniform(*self.action_bound, self.ncs)
 
     def _check_change_light(self):
         self.t_light += self.dt
@@ -105,149 +129,125 @@ class Env(object):
                 if self.viewer is not None:
                     self.viewer.light.colors = self.viewer.color['red'] * 4
 
-    def _check_gen_car(self, s_=None):
-        if self.t_gen >= self.ave_headway or len(self.car_info.nonzero()[0]) == 0:
-            self.t_gen -= self.ave_headway
-            self.car_info[self.n_car_show, :] = [0, self.init_v/3.6, False, False, 0]   # position, velocity, passed_light, run_red, reward
-            self.n_car_show += 1
-            if s_ is not None:
-                cars_show = self.car_info[:self.n_car_show]
-                s_ = self._get_state(*self._get_t2r_and_t2g(), cars_show)
-        self.t_gen += self.dt   # accumulate time
-        return s_
-
-    def _check_rm_car(self, s_):
-        if self.car_info[0, 0] >= self.max_p:
-            self.car_info[0, :] *= 0
-            self.car_info = np.roll(self.car_info, -1, axis=0)      # move the 1st row to last, keep its id in memory
-            self.n_car_show -= 1    # minus one car on the road
-            if s_ is not None:
-                cars_show = self.car_info[:self.n_car_show]
-                s_ = self._get_state(*self._get_t2r_and_t2g(), cars_show)
-        return s_
-
-    def _get_state(self, t2r, t2g, cars):
+    def _get_state_norm(self, return_dx_d2l=False):
         """
-        0. t2red / 100     (normalized)
-        1. t2green / 100      (normalized)
-        2. distance2light / 100                (normalized)
+        0. light_time      (cosine)
+        1. light_time derivative   (-sine)
+        2. distance2light              (normalized)
         3. dx     (exclude car length, normalized)
         4. dv     (m/s)   (normalized)
         5. v      (m/s)   (normalized)
-        # 6. time2light
         """
-        p, v = cars[:, 0], cars[:, 1]
-        t2r_vec = (np.zeros_like(p) + t2r) / 100.     # normalized
-        t2g_vec = (np.zeros_like(p) + t2g) / 100.   # normalized
-        dp = self.light_p - p
-        distance2light = np.minimum(dp, 1000.) / 1000.     # normalized affect range=1000, normalized to 10
-        distance2light[dp < 0] = 1.     # if passed light, the distance set to 10
+        dl = self.light_p - self.car_info['p'][:self.ncs]   # distance to light
 
-        dx_max = 100.    # meters if no preceding car
-        dx = np.concatenate(([dx_max], -np.diff(p)))     # add dx_max to the leader
-        dx = (dx.clip(max=dx_max) - self.car_l) / dx_max    # clip to the max dx and normalize
-        dv = np.concatenate(([0.], np.diff(v))) / 5         # add dv=0 as for leader
-        v_norm = v / (self.init_v/3.6)    # normalize velocity
-        return np.vstack((t2r_vec, t2g_vec, distance2light, dx, dv, v_norm)).T
+        state_mat = np.empty((self.ncs, 6), dtype=np.float32, order='F')
 
-    def _get_state2(self, t2r, t2g, cars):
-        p, v = cars[:, 0], cars[:, 1]
-        # t2r_vec = (np.zeros_like(p) + t2r)
-        # t2g_vec = (np.zeros_like(p) + t2g)
-        dp = self.light_p - p
-        distance2light = np.minimum(dp, 1000.) / 1000.  # normalized affect range=1000
-        distance2light[dp < 0] = 1.  # if passed light, the distance set to 1
-
-        dx_max = 100.  # meters if no preceding car
-        dx = np.concatenate(([dx_max], -np.diff(p)))  # add dx_max to the leader
-        dx = (dx.clip(max=dx_max) - self.car_l) / dx_max  # clip to the max dx and normalize
-        dv = np.concatenate(([0.], np.diff(v))) / 5  # add dv=0 as for leader
-        v_norm = v / self.init_v  # normalize velocity
-        t2light = np.empty_like(dp)
-        t2light[dp>=0] = np.minimum((dp / (v + 1e-3))[dp>=0], 100.) # not pass light
-        # t2light[dp<0] = (np.zeros_like(dp[dp < 0]) + 100)    # passed light
-        run_green = np.ones_like(p)
-        t_red = self.light_duration['red']
-        t_green = self.light_duration['green']
+        # t2rg_norm
         if self.is_red_light:
-            pass_index = (t2light > t2g) & (t2light < (t2g + t_green))
-            stop_index = t2light < t2g
-            run_green[pass_index] = (t2light[pass_index] - t2g)/t_green   # run to next green phase
-            run_green[stop_index] = -(t2g-t2light[stop_index])/t_red      # run to this red phase
-            # others not cares, = 1
+            light_mapping = (self.t_light / self.light_duration['red']) * np.pi
+        else:  # decrease with the t_light counting
+            light_mapping = (self.t_light / self.light_duration['green']) * np.pi + np.pi
+        np.cos(light_mapping, out=state_mat[:, 0])  # light time
+        np.sin(-light_mapping, out=state_mat[:, 1])  # light time derivative
+        pass_light_indices = dl < 0
+        state_mat[:, 0] = np.where(pass_light_indices, [-1.], state_mat[:, 0])     # pass light is given green light "-1"
+        state_mat[:, 1] = np.where(pass_light_indices, [0.], state_mat[:, 1])
+
+        # distance2light_norm
+        d2l = np.minimum(dl, 2000.)
+        state_mat[:, 2] = np.where(pass_light_indices, [2.], d2l / 1000)  # pass light is given large distance to light
+
+        # dx_norm
+        dx_max = 100.    # meters if no preceding car      
+        dx = np.concatenate(([100.], -np.diff(self.car_info['p'][:self.ncs])-self.car_l))
+        np.minimum(dx, 100., out=dx)     # exclude car length
+        np.divide(dx, dx_max, out=state_mat[:, 3])
+
+        # dv_norm
+        state_mat[0, 4] = 0.
+        state_mat[1:, 4] = np.diff(self.car_info['v'][:self.ncs])
+        np.divide(state_mat[1:, 4],  10., out=state_mat[1:, 4])     # normalize
+
+        # v_norm
+        state_mat[:, 5] = self.car_info['v'][:self.ncs]
+        np.divide(state_mat[:, 5], self.max_v, out=state_mat[:, 5])
+        
+        if return_dx_d2l:
+            return state_mat, dx, d2l
         else:
-            pass_index = (t2light > t2g) & (t2light < (t2g + t_green))
-            stop_index = t2light < t2g
-            run_green[t2light < t2r] = 1.   # run to this green phase
-            # run_green[t2light > (t2r + t_red)] = 0. # others not cares,
-            # others run to next red phase = -1
-        run_green[dp<0] = 1.      # passed light = run_green
-        # t2g_t2l = (t2g - t2light)/20
-        return np.vstack((run_green, dx, dv, v_norm)).T
+            return state_mat
 
-    def _get_t2r_and_t2g(self):    # time to next red and green phase
-        if self.is_red_light:  # time 2 next red and green
-            t2g = self.light_duration['red'] - self.t_light  # rest of red time
-            t2r = t2g + self.light_duration['green']  # rest of red time + a green phase
-        else:  # time 2 next red and green
-            t2r = self.light_duration['green'] - self.t_light  # rest of green time
-            t2g = t2r + self.light_duration['red']  # rest of green time + a red phase
-        return t2r, t2g
-
-    def _get_r_and_done(self, state, pass_light_last_step, cars_show, t2r, t2g):
-        """
-        collision: r -= 5
-        run the red light: r -= 10
-        maintain high speed: r += max(1)
-        """
-        done = False
-        # r = np.zeros((self.n_car_show, ))
+    def _reward_08_17(self, dx, d2l):
+        # speed reward
         v_r_max = 1.
-        r = v_r_max - np.abs(cars_show[:, 1] * 3.6 - self.init_v)/(self.init_v/(2*v_r_max))      # normalized (v=30km/h -> r += 1, v=0km/h or =60 -> r -= 1
+        a = v_r_max / self.max_v
+        v = self.car_info['v'][:self.ncs]
+        less_than_desired = v <= self.max_v
+        r = v * a
+        r[~less_than_desired] = -1.
 
-        # check if run red
-        # if self.is_red_light:   # red phase
-        #     run_red = (np.invert(pass_light_last_step.astype(np.bool))) & cars_show[:, 2].astype(np.bool)
-            # r[run_red] = -20.  # run red
-            # if np.any(run_red):
-                # done = True
-        # else:   # green phase
-        #     run_green = (np.invert(pass_light_last_step.astype(np.bool))) & cars_show[:, 2].astype(np.bool)
-        #     r[run_green] = 1.  # run green
+        # time gap reward
+        time_gap = dx / (v + 1e-4)
+        too_close = time_gap <= self.safe_t_gap
+        r = np.where(too_close, [-v_r_max], r)
 
-        dp = self.light_p - cars_show[:, 0]
-        t2light = np.zeros_like(dp) + 100.  # default to max time
-        t2light[dp >= 0] = np.minimum((dp / (cars_show[:, 1] + 1e-3))[dp >= 0], 100.)  # not pass light
-        t_green = self.light_duration['green']
-        t_red = self.light_duration['red']
+        # check run red
+
+        time2light = d2l / (v + 1e-4)
+        not_pass_light_last_step = ~self.car_info['pass_l'][:self.ncs]
         if self.is_red_light:
-            # not_care_index = t2light >= (t2g + t_green)
-            # pass_index = (t2light > t2g) & (t2light < (t2g + t_green))
-            not_pass_index = (t2light <= t2g) #| ((t2light > t2r) & (t2light < t2r + t_red))
-
-            # dist2light = state[:, 2]*1000   # scale back to meter
-            # short_dist2light_idx = dist2light < 3
-            # r[short_dist2light_idx] += -5.      # to close to light
+            t2g = self.light_duration['red'] - self.t_light
+            run_red = (time2light < t2g) & not_pass_light_last_step
         else:
-            # pass_index = t2light < t2r
-            not_pass_index = (t2light >= t2r) & (t2light < t2g)
-        # r[pass_index | (dp <= 0)] += .1   # run to this green phase
-        r[not_pass_index] = -v_r_max  # set to the min of reward for v to avoid stopping effect
+            t2r = self.light_duration['green'] - self.t_light
+            t2g = t2r + self.light_duration['red']
+            run_red = (time2light > t2r) & (time2light < t2g) & not_pass_light_last_step
+        r[run_red] = -.1
+        return r
+
+    def _get_r_and_done(self, dx, d2l):
+        done = False
+        r = self._reward_08_17(dx, d2l)
 
         # check collision and too close distance
-        is_collision = state[:, 3] * 100 <= 0     # dx
-        headway = state[:, 3] * 100 / (cars_show[:, 1]*3.6+1e-4)
-        too_close1 = headway <= 0.2  #  dx/v = headway normalized
-        r[too_close1] = -v_r_max
-        # too_close2 = headway <= 0.1  # dx/v = headway normalized
-        # r[too_close2] = -v_r_max
-        if np.any(is_collision): #or run_red_terminal:    # dx < 0 = collision
+        if np.any(dx <= 0):
             done = True
-            # r[is_collision] = -5.
         return r, done
 
     def plot_reward_func(self):
-        pass
+        plt.figure(1)
+        v_r_max = 1.
+        a = v_r_max / self.max_v
+        v = np.linspace(0, 36, 100)
+        less_than_desired = v <= self.max_v
+        r1 = np.where(less_than_desired, v * a, [-1.])
+
+        r2 = np.empty((20, ))
+        h = np.linspace(0, self.safe_t_gap, 20)
+        r2[:] = -1
+
+        plt.subplot(121)
+        plt.plot(v*3.6, r1)
+        plt.subplot(122)
+        plt.plot(h, r2)
+        plt.show()
+
+    def plot_light_feature(self):
+        t = np.linspace(0, np.pi * 4, 200)
+        light_feature = np.cos(t)
+        light_derivative = np.sin(-t)
+        ax1 = plt.subplot(211)
+        plt.plot(t, light_feature)
+        plt.setp(ax1.get_xticklabels(), visible=False)
+        plt.ylabel('cos')
+        plt.subplot(212, sharex=ax1)
+        plt.plot(t, light_derivative)
+        plt.xticks((0, np.pi, 2*np.pi, 3*np.pi, 4*np.pi), ('0', '$\pi$', '$2\pi$', '$3\pi$', '$4\pi$'))
+        plt.ylabel('deri_cos')
+        plt.show()
+
+    def set_fps(self, fps=10):
+        pyglet.clock.set_fps_limit(fps)
 
 
 class Viewer(pyglet.window.Window):
@@ -258,6 +258,7 @@ class Viewer(pyglet.window.Window):
     }
     fps_display = pyglet.clock.ClockDisplay()
     car_img = pyglet.image.load('car.png')
+    display_game = True
 
     def __init__(self, car_num_limit, max_p, light_p, width=600, height=600,):
         super(Viewer, self).__init__(width, height, resizable=False, caption='RL_car', vsync=False)  # vsync=False to not use the monitor FPS
@@ -284,11 +285,12 @@ class Viewer(pyglet.window.Window):
         self.light = self.batch.add(4, pyglet.gl.GL_QUADS, None, ('v2f', light_box), ('c3B', self.color['red']*4))
 
     def render(self):
-        pyglet.clock.tick()
-        self.switch_to()
         self.dispatch_events()
-        self.dispatch_event('on_draw')
-        self.flip()
+        if self.display_game:
+            pyglet.clock.tick()
+            self.switch_to()
+            self.dispatch_event('on_draw')
+            self.flip()
 
     def on_draw(self):
         self.clear()
@@ -302,6 +304,11 @@ class Viewer(pyglet.window.Window):
             pyglet.clock.set_fps_limit(1000)
         elif symbol == pyglet.window.key.DOWN:
             pyglet.clock.set_fps_limit(10)
+        elif symbol == pyglet.window.key.SPACE:
+            if self.display_game is False:
+                self.display_game = True
+            else:
+                self.display_game = False
 
 
 class Car(pyglet.sprite.Sprite):
@@ -317,7 +324,7 @@ class Car(pyglet.sprite.Sprite):
 
         # text describe
         self.label = pyglet.text.Label(
-            text='', font_size=12, bold=True,
+            text='', font_size=7, bold=True,
             anchor_x='center', anchor_y='center', align='center', batch=batch)
 
         # supered attributes
@@ -326,9 +333,7 @@ class Car(pyglet.sprite.Sprite):
         self.image.anchor_x = self.image.width / 2
         self.image.anchor_y = self.image.height / 2
 
-    def update(self, car_info):
-        p, v, r = car_info[0], car_info[1]*3.6, car_info[-1]
-
+    def update(self, p, v, r):
         p_percent = p / self.max_p  # how many road left
         mod_p = convert2pixel(p) % self.g_circumference
         radian = mod_p / self.cr
@@ -341,9 +346,9 @@ class Car(pyglet.sprite.Sprite):
         self.x, self.y, self.rotation = self.gc[0] + dx, self.gc[1] - dy, -np.rad2deg(radian)
 
         # label
-        r_color = cm.rainbow(int((-r+0.4)*310-20))  # the value should in a range of (0, 255), the RGB max=1
-        self.label.text = '%.0f/%.2f' % (v, r)
-        self.label.x, self.label.y = int(self.gc[0] + dx*1.2), int(self.gc[1] - dy*1.2)
+        r_color = cm.rainbow(int((-r+1)/2*255))  # the value should in a range of (0, 255), the RGB max=1
+        self.label.text = '%.0f/%.2f' % (v*3.6, r)
+        self.label.x, self.label.y = int(self.gc[0] + dx*1.1), int(self.gc[1] - dy*1.1)
         self.label.color = (np.array(r_color)*255).astype(np.int32).tolist()    # has to be a tuple or list with max=255
 
 
@@ -351,14 +356,15 @@ if __name__ == '__main__':
     np.random.seed(1)
     env = Env()
     # env.plot_reward_func()
+    # env.plot_light_feature()
     env.set_fps(60)
 
     for i in range(100):
         s = env.reset()
         while True:
             env.render()
-            a = np.zeros((env.n_car_show, ))
-            s_, r, done = env.step(a)
-            s = env.update_s_(s_)
+            a = np.zeros((env.ncs, ))
+            s_, r, done, s = env.step(a)
+            # (t2rg, distance2light, dx, dv, v_norm)
             if done:
                 break

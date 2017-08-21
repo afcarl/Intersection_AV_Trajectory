@@ -3,19 +3,18 @@ from env import Env
 from torchDDPG import DDPG, DDPGPrioritizedReplay
 import numpy as np
 import matplotlib.pyplot as plt
-import sys
+import sys, time, threading
 
 
-TOTAL_EP = 300
+TOTAL_EP = 5000
 A_LR = 0.0001
-C_LR = 0.0001
-A_REPLACE_ITER = 1000
-C_REPLACE_ITER = 1000
-GAMMA = 0.9
-MEMORY_CAPACITY = 20000  # should consist of several episodes
-BATCH_SIZE = 64
-MAX_EP_STEP = 5000
-TRAIN = {'train': True, 'save_iter': 50000, 'load_point': 250000}
+C_LR = 0.001
+TAU = 0.005
+GAMMA = 0.95
+MEMORY_CAPACITY = 200000  # should consist of several episodes
+BATCH_SIZE = 32
+MAX_EP_STEP = 1800
+TRAIN = {'train': True, 'save_iter': None, 'load_point': -1}
 
 env = Env()
 env.set_fps(1000)
@@ -23,52 +22,53 @@ A_DIM = env.action_dim
 S_DIM = env.state_dim
 A_BOUND = env.action_bound
 
-RL = DDPG(
-        s_dim=S_DIM, a_dim=A_DIM, a_bound=A_BOUND,
-        a_lr=A_LR, a_replace_iter=A_REPLACE_ITER,
-        c_lr=C_LR, c_replace_iter=C_REPLACE_ITER, gamma=GAMMA,
-        memory_capacity=MEMORY_CAPACITY, batch_size=BATCH_SIZE,
-        train=TRAIN,
-    )
 
-
-def train():
+def fill_memory(RL):
     print('Storing transitions....')
     m_counter = 0
     while True:
         s = env.reset()
         while True:
             a = env.sample_action()
-            s_, r, done = env.step(a.flatten())
+            s_, r, done, new_car_s = env.step(a.ravel())    # remove and add new cars
             RL.store_transition(s, a, r, s_)
             m_counter += len(s)
-            s = env.update_s_(s_)
+            s = new_car_s
             if done:
                 break
         if m_counter >= RL.memory_capacity:
             break
+    return RL
 
+
+def twork(RL, stop_event, lock=None,):
     # learning
     global_step = 0
-    var = 3
+    measure100 = 0.
+    t0 = time.time()
+    var = 7
     running_r = []
     print('\nStart Training')
     for i_ep in range(TOTAL_EP):
         s = env.reset()
         ep_r = 0
         for step in range(MAX_EP_STEP):
-            if i_ep >= 70:
-                env.render()
+            env.render()
             a = RL.choose_action(s)
             a = np.clip(np.random.normal(a, var, size=a.shape), *A_BOUND)     # clip according to bound
-            s_, r, done = env.step(a.flatten())
+            s_, r, done, new_car_s = env.step(a.ravel())  # remove and add new cars
 
             ep_r += np.mean(r)
+            if lock is not None: lock.acquire()
             RL.store_transition(s, a, r, s_)
+            if lock is not None: lock.release()
 
-            var = max([0.9999 * var, 0.1])  # keep exploring
-            RL.learn()
+            var = max([0.99999 * var, 0.5])  # keep exploring
             global_step += 1
+            if global_step % 100 == 0:      # record time
+                t100 = time.time()
+                measure100 = t100 - t0
+                t0 = t100
             if done or step == MAX_EP_STEP-1:
                 if len(running_r) == 0:
                     running_r.append(ep_r)
@@ -76,13 +76,16 @@ def train():
                     running_r.append(0.99*running_r[-1]+0.01*ep_r)
                 print(
                     'Ep: %i' % i_ep,
-                    '| RunningR: %.2f' % running_r[-1] if len(running_r) > 0 else 0.,
-                    '| Ep_r: %.2f' % ep_r,
+                    '| RunningR: %.0f' % running_r[-1] if len(running_r) > 0 else 0.,
+                    '| Ep_r: %.0f' % ep_r,
                     '| Var: %.3f' % var,
+                    '| T100: %.2f' % measure100,
+                    '| LC: %i' % RL.learn_counter,
+                    '%s' % ('| 1prio: %.2f' % (RL.memory.tree.total_p/RL.memory_capacity) if RL.__class__.__name__ != 'DDPG' else ''),
                 )
                 break
-            s = env.update_s_(s_)
-
+            s = new_car_s
+    stop_event.set()
     RL.save()
     # np.save(model_dir+'/running_r', np.array(running_r))
     # plot_running_r(5)
@@ -95,8 +98,8 @@ def load():
         while True:
             env.render()
             a = RL.choose_action(s)
-            s_, r, done = env.step(a.flatten())
-            s = env.update_s_(s_)
+            s_, r, done, new_s = env.step(a.ravel())
+            s = new_s
             if done:
                 break
 
@@ -111,8 +114,23 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         TRAIN['train'] = int(sys.argv[1])
     print('Training..' if TRAIN['train'] else 'Testing..')
+    RL = DDPG(
+        s_dim=S_DIM, a_dim=A_DIM, a_bound=A_BOUND,
+        a_lr=A_LR, c_lr=C_LR,
+        tau=TAU, gamma=GAMMA,
+        memory_capacity=MEMORY_CAPACITY, batch_size=BATCH_SIZE,
+        train=TRAIN,
+    )
     if TRAIN['train']:
-        train()
+        RL = fill_memory(RL)
+        stop_event = threading.Event()
+        lock = threading.Lock()
+        stop_event.clear()
+        t = threading.Thread(target=RL.threadlearn, args=(stop_event, lock))
+        t.start()
+        twork(RL, stop_event, lock,)
+        t.join()
+
     else:
         load()
 

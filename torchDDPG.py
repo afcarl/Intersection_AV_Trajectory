@@ -17,19 +17,19 @@ class SumTree(object):
     """
     data_pointer = 0
 
-    def __init__(self, capacity):
+    def __init__(self, capacity, transition_size):
         self.capacity = capacity  # for all priority values
         self.tree = np.zeros(2 * capacity - 1, dtype=np.float32)
         # [--------------Parent nodes-------------][-------leaves to recode priority-------]
         #             size: capacity - 1                       size: capacity
-        self.data = np.zeros(capacity, dtype=object)  # for all transitions
+        self.data = np.zeros((capacity, transition_size), dtype=np.float32, order='C')  # for all transitions
         # [--------------data frame-------------]
         #             size: capacity
 
     def add(self, p, data):
         for d in data:
             tree_idx = self.data_pointer + self.capacity - 1
-            self.data[self.data_pointer] = d  # update data_frame
+            self.data[self.data_pointer, :] = d  # update data_frame
             self.update(tree_idx, p)  # update tree_frame, add this p (maxp) for all transitions
 
             self.data_pointer += 1
@@ -73,7 +73,7 @@ class SumTree(object):
                     parent_idx = cr_idx
 
         data_idx = leaf_idx - self.capacity + 1
-        return leaf_idx, self.tree[leaf_idx], self.data[data_idx]
+        return leaf_idx, data_idx
 
     @property
     def total_p(self):
@@ -88,11 +88,15 @@ class Memory(object):  # stored as ( s, a, r, s_ ) in SumTree
     epsilon = 0.01  # small amount to avoid zero priority
     alpha = 0.6  # [0~1] convert the importance of TD error to priority
     beta = 0.4  # importance-sampling, from initial value increasing to 1
-    beta_increment_per_sampling = 0.001
+    beta_increment_per_sampling = 0.00001
     abs_err_upper = 1.  # clipped abs error
 
-    def __init__(self, capacity):
-        self.tree = SumTree(capacity)
+    def __init__(self, capacity, batch_size, transition_size):
+        self.tree = SumTree(capacity, transition_size)
+        self.batch_size = batch_size
+        self.b_idx, self.b_memory, self.ISWeights = \
+            np.empty((batch_size,), dtype=np.int32), np.empty((batch_size, transition_size), dtype=np.float32), \
+            np.empty((batch_size,), dtype=np.float32)
 
     def store(self, transition):
         max_p = np.max(self.tree.tree[-self.tree.capacity:])
@@ -100,33 +104,34 @@ class Memory(object):  # stored as ( s, a, r, s_ ) in SumTree
             max_p = self.abs_err_upper
         self.tree.add(max_p, transition)   # set the max p for new p
 
-    def sample(self, n):
-        b_idx, b_memory, ISWeights = np.empty((n,), dtype=np.int32), np.empty((n, self.tree.data[0].size)), np.empty((n, 1))
-        pri_seg = self.tree.total_p / n       # priority segment
+    def sample(self):
+        pri_seg = self.tree.total_p / self.batch_size       # priority segment
         self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])  # max = 1
 
-        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_p     # for later calculate ISweight
-        for i in range(n):
+        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_p  # for later calculate ISweight
+        data_indices = np.empty_like(self.b_idx)
+        for i in range(self.batch_size):
             a, b = pri_seg * i, pri_seg * (i + 1)
             v = np.random.uniform(a, b)
-            idx, p, data = self.tree.get_leaf(v)
-            prob = p / self.tree.total_p
-            ISWeights[i, 0] = np.power(prob/min_prob, -self.beta)
-            b_idx[i], b_memory[i, :] = idx, data
+            self.b_idx[i], data_indices[i] = self.tree.get_leaf(v)
 
-        return b_idx, b_memory, ISWeights
+        np.take(self.tree.tree, self.b_idx, axis=0, out=self.ISWeights)
+        np.power(self.ISWeights / self.tree.total_p / min_prob, -self.beta, out=self.ISWeights)
+        np.take(self.tree.data, data_indices, axis=0, out=self.b_memory)
+        return self.b_idx, self.b_memory, self.ISWeights[:, np.newaxis]
 
     def batch_update(self, tree_idx, abs_errors):
         abs_errors += self.epsilon  # convert to abs and avoid 0
-        clipped_errors = np.minimum(abs_errors, self.abs_err_upper)
-        ps = np.power(clipped_errors, self.alpha)
+        clipped_errors = ps = abs_errors[:]
+        np.minimum(abs_errors, self.abs_err_upper, out=clipped_errors)
+        np.power(clipped_errors, self.alpha, out=ps)
         for ti, p in zip(tree_idx, ps):
             self.tree.update(ti, p)
 
 
 def init_w_b(layer):
     init.xavier_normal(layer.weight)
-    init.constant(layer.bias, 0.01)
+    init.constant(layer.bias, 0.1)
 
 
 class Actor(nn.Module):
@@ -134,7 +139,7 @@ class Actor(nn.Module):
         super(Actor, self).__init__()
         self.name = name
         self.a_bound = a_bound
-        layers = [100, 100]
+        layers = [256, 256]
         self.fc1 = nn.Linear(s_dim, layers[0])
         self.fc2 = nn.Linear(layers[0], layers[1])
         self.out = nn.Linear(layers[1], a_dim)
@@ -143,6 +148,8 @@ class Actor(nn.Module):
         self.tanh = nn.Tanh()
         self.scale = (self.a_bound[1] - self.a_bound[0]) / 2
         self.shift = self.a_bound[1] - self.scale
+        if '_' in name:     # set target net to not bp
+            self.eval()
 
     def forward(self, s):
         net = self.ac1(self.fc1(s))
@@ -156,15 +163,17 @@ class Critic(nn.Module):
     def __init__(self, s_dim, a_dim, name):
         super(Critic, self).__init__()
         self.name = name
-        layers = [100, 100]
+        layers = [256, 256]
         self.w1s = Parameter(torch.Tensor(s_dim, layers[0]))
         self.w1a = Parameter(torch.Tensor(a_dim, layers[0]))
         [w.data.normal_(0.0, 0.01) for w in [self.w1a, self.w1s]]
-        self.b1 = Parameter(torch.zeros(1, layers[0])+0.01)
+        self.b1 = Parameter(torch.zeros(1, layers[0])+0.1)
         self.fc2 = nn.Linear(layers[0], layers[1])
         self.out = nn.Linear(layers[1], 1)
         [init_w_b(l) for l in [self.fc2, self.out]]
         self.ac1 = nn.ReLU()
+        if '_' in name:     # set target net to not bp
+            self.eval()
 
     def forward(self, s, a):
         w1x = torch.mm(a, self.w1a) + torch.mm(s, self.w1s)
@@ -177,17 +186,14 @@ class Critic(nn.Module):
 class DDPG(object):
     def __init__(self,
                  s_dim, a_dim, a_bound,
-                 a_lr=0.001, a_replace_iter=600,
-                 c_lr=0.001, c_replace_iter=500,
-                 tau=0.01, gamma=0.9,
+                 a_lr=0.001,c_lr=0.001,
+                 tau=0.001, gamma=0.9,
                  memory_capacity=5000, batch_size=64,
-                 train={'train': True, 'save_iter': 10000, 'load_point': 400},
+                 train={'train': True, 'save_iter': None, 'load_point': -1},
                  model_dir='./torch_models',
                  ):
 
         self.s_dim, self.a_dim, self.a_bound = s_dim, a_dim, a_bound
-        self.a_replace_iter = a_replace_iter
-        self.c_replace_iter = c_replace_iter
         self.learn_counter = 0
         self.tau = tau
         self.gamma = gamma
@@ -198,6 +204,9 @@ class DDPG(object):
         self.memory_capacity = memory_capacity
         self.memory = np.zeros((memory_capacity, s_dim * 2 + a_dim + 1), dtype=np.float32)
         self.pointer = 0
+        self.update_times = 10
+        self.batch_holder = np.empty((self.batch_size*self.update_times, self.memory.shape[1]), dtype=np.float32)
+
         self.anet, self.anet_ = Actor(s_dim, a_dim, a_bound, 'anet'), Actor(s_dim, a_dim, a_bound, 'anet_')
         self.cnet, self.cnet_ = Critic(s_dim, a_dim, 'cnet'), Critic(s_dim, a_dim, 'cnet_')
         self.all_nets = [self.anet, self.anet_, self.cnet, self.cnet_]
@@ -213,35 +222,51 @@ class DDPG(object):
         s = Variable(torch.from_numpy(s).float())
         return self.anet(s).data.numpy()
 
-    def learn(self):
+    def learn(self, lock=None):
         # hard replacement
         self._soft_rep_target()
         self._check_save()
 
-        indices = np.random.choice(self.memory_capacity, size=self.batch_size)
-        bt = self.memory[indices, :]
-        bs, ba, br, bs_ = bt[:, :self.s_dim], bt[:, self.s_dim: self.s_dim + self.a_dim], \
-                          bt[:, -self.s_dim - 1: -self.s_dim], bt[:, -self.s_dim:]
-        Vbs, Vba, Vbr, Vbs_ = Variable(torch.from_numpy(bs)), Variable(torch.from_numpy(ba), requires_grad=True), \
-                              Variable(torch.from_numpy(br)), Variable(torch.from_numpy(bs_))
+        indices = np.random.randint(self.memory_capacity, size=self.batch_size*self.update_times)
+        if lock is not None: lock.acquire()
+        np.take(self.memory, indices, axis=0, out=self.batch_holder)
+        if lock is not None: lock.release()
 
-        target_q = Vbr + self.gamma * self.cnet_(Vbs_, self.anet_(Vbs_)).detach()    # not train
-        c_loss = self.closs_func(self.cnet(Vbs, Vba), target_q)
-        self.copt.zero_grad()
-        c_loss.backward()
-        self.copt.step()
+        s, a, r, s_ = self.batch_holder[:, :self.s_dim], \
+                      self.batch_holder[:, self.s_dim: self.s_dim + self.a_dim], \
+                      self.batch_holder[:, -self.s_dim - 1: -self.s_dim], \
+                      self.batch_holder[:, -self.s_dim:]
+        Vs, Va, Vr, Vs_ = Variable(torch.from_numpy(s)), Variable(torch.from_numpy(a), requires_grad=True), \
+                          Variable(torch.from_numpy(r)), Variable(torch.from_numpy(s_))
+        for ut in range(self.update_times):
+            self.learn_counter += 1
+            Vbs, Vba, Vbr, Vbs_ = Vs[ut * self.batch_size: (ut + 1) * self.batch_size], \
+                                  Va[ut * self.batch_size: (ut + 1) * self.batch_size], \
+                                  Vr[ut * self.batch_size: (ut + 1) * self.batch_size], \
+                                  Vs_[ut * self.batch_size: (ut + 1) * self.batch_size]
 
-        policy_loss = -self.cnet(Vbs, self.anet(Vbs)).mean()
-        self.aopt.zero_grad()
-        policy_loss.backward()
-        self.aopt.step()
+            target_q = Vbr + self.gamma * self.cnet_(Vbs_, self.anet_(Vbs_)).detach()    # not train
+            c_loss = self.closs_func(self.cnet(Vbs, Vba), target_q)
+            self.copt.zero_grad()
+            c_loss.backward()
+            self.copt.step()
+
+            policy_loss = -self.cnet(Vbs, self.anet(Vbs)).mean()
+            self.aopt.zero_grad()
+            policy_loss.backward()
+            self.aopt.step()
+
+    def threadlearn(self, stop_event, lock=None):
+        while not stop_event.is_set():
+            self.learn(lock)
 
     def store_transition(self, s, a, r, s_):
         if a.ndim < 2:
-            a = a[:, np.newaxis]
+            a = a[:, None]
         if r.ndim < 2:
-            r = r[:, np.newaxis]
+            r = r[:, None]
         transition = np.concatenate((s, a, r, s_), 1)
+        transition = np.ascontiguousarray(transition)
         p_ = self.pointer + transition.shape[0]
         if p_ <= self.memory_capacity:
             self.memory[self.pointer:p_, :] = transition
@@ -271,52 +296,57 @@ class DDPGPrioritizedReplay(DDPG):
 
     def __init__(self,
                  s_dim, a_dim, a_bound,
-                 a_lr=0.001, a_replace_iter=600,
-                 c_lr=0.001, c_replace_iter=500, gamma=0.9,
+                 a_lr=0.001, c_lr=0.001,
+                 tau=0.001, gamma=0.9,
                  memory_capacity=5000, batch_size=64,
-                 train={'train': True, 'save_iter': 10000, 'load_point': 400},
+                 train={'train': True, 'save_iter': None, 'load_point': -1},
                  model_dir='./model',
                  ):
         super(DDPGPrioritizedReplay, self).__init__(
             s_dim=s_dim, a_dim=a_dim, a_bound=a_bound,
-            a_lr=a_lr, a_replace_iter=a_replace_iter,
-            c_lr=c_lr, c_replace_iter=c_replace_iter, gamma=gamma,
+            a_lr=a_lr, c_lr=c_lr,
+            tau=tau, gamma=gamma,
             memory_capacity=memory_capacity, batch_size=batch_size,
             train=train, model_dir=model_dir,)
-        self.memory = Memory(capacity=memory_capacity)
+        transition_size = s_dim * 2 + a_dim + 1
+        self.memory = Memory(capacity=memory_capacity, batch_size=batch_size, transition_size=transition_size)
 
-    def learn(self):
+    def learn(self, lock=None):
         # hard replacement
         self._soft_rep_target()
         self._check_save()
 
-        tree_idx, bt, ISWeights = self.memory.sample(self.batch_size)
+        for _ in range(10):
+            self.learn_counter += 1
+            if lock is not None: lock.acquire()
+            tree_idx, bt, ISWeights = self.memory.sample()
+            if lock is not None: lock.release()
 
-        bs, ba, br, bs_ = bt[:, :self.s_dim], bt[:, self.s_dim: self.s_dim + self.a_dim], \
-                          bt[:, -self.s_dim - 1: -self.s_dim], bt[:, -self.s_dim:]
-        Vbs, Vba, Vbr, Vbs_, VISW = \
-            Variable(torch.from_numpy(bs).float()), Variable(torch.from_numpy(ba).float()), \
-            Variable(torch.from_numpy(br).float()), Variable(torch.from_numpy(bs_).float()),\
-            Variable(torch.from_numpy(ISWeights).float())
+            bs, ba, br, bs_ = bt[:, :self.s_dim], bt[:, self.s_dim: self.s_dim + self.a_dim], \
+                              bt[:, -self.s_dim - 1: -self.s_dim], bt[:, -self.s_dim:]
+            Vbs, Vba, Vbr, Vbs_, VISW = \
+                Variable(torch.from_numpy(bs).float()), Variable(torch.from_numpy(ba).float()), \
+                Variable(torch.from_numpy(br).float()), Variable(torch.from_numpy(bs_).float()),\
+                Variable(torch.from_numpy(ISWeights).float())
 
-        target_q = Vbr + self.gamma * self.cnet_(Vbs_, self.anet_(Vbs_)).detach()  # not train
-        td_errors = self.cnet(Vbs, Vba) - target_q
+            target_q = Vbr + self.gamma * self.cnet_(Vbs_, self.anet_(Vbs_)).detach()  # not train
+            td_errors = self.cnet(Vbs, Vba) - target_q
 
-        # update priority
-        abs_errors = torch.abs(td_errors).data.numpy()
-        for i in range(len(tree_idx)):  # update priority
-            idx = tree_idx[i]
-            self.memory.update(idx, abs_errors[i])
+            # update priority
+            abs_errors = torch.abs(td_errors).data.numpy()
+            if lock is not None: lock.acquire()
+            self.memory.batch_update(tree_idx, abs_errors)
+            if lock is not None: lock.release()
 
-        c_loss = torch.mean(VISW * torch.pow(td_errors, 2))
-        self.copt.zero_grad()
-        c_loss.backward()
-        self.copt.step()
+            c_loss = torch.mean(VISW * torch.pow(td_errors, 2))
+            self.copt.zero_grad()
+            c_loss.backward()
+            self.copt.step()
 
-        policy_loss = -self.cnet(Vbs, self.anet(Vbs)).mean()
-        self.aopt.zero_grad()
-        policy_loss.backward()
-        self.aopt.step()
+            policy_loss = -self.cnet(Vbs, self.anet(Vbs)).mean()
+            self.aopt.zero_grad()
+            policy_loss.backward()
+            self.aopt.step()
 
     def store_transition(self, s, a, r, s_):
         if a.ndim < 2:
