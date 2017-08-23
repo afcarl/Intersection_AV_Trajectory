@@ -1,20 +1,20 @@
 from env import Env
-# from DDPG import DDPG, DDPGPrioritizedReplay
-from torchDDPG import DDPG, DDPGPrioritizedReplay
+from tfDDPG import DDPG, DDPGPrioritizedReplay
+# from torchDDPG import DDPG, DDPGPrioritizedReplay
 import numpy as np
 import matplotlib.pyplot as plt
-import sys, time, threading
+import time, threading
 
 
-TOTAL_EP = 5000
-A_LR = 0.0001
+TOTAL_EP = 600
+A_LR = 0.0005
 C_LR = 0.001
 TAU = 0.005
 GAMMA = 0.95
-MEMORY_CAPACITY = 200000  # should consist of several episodes
+MEMORY_CAPACITY = 100000  # should consist of several episodes
 BATCH_SIZE = 32
-MAX_EP_STEP = 1800
-TRAIN = {'train': True, 'save_iter': None, 'load_point': -1}
+MAX_EP_STEP = 1500
+TRAIN = {'train': False, 'save_iter': None, 'load_point': -1}
 
 env = Env()
 env.set_fps(1000)
@@ -24,7 +24,7 @@ A_BOUND = env.action_bound
 
 
 def fill_memory(RL):
-    print('Storing transitions....')
+    print('Filling transitions....')
     m_counter = 0
     while True:
         s = env.reset()
@@ -55,7 +55,7 @@ def twork(RL, stop_event, lock=None,):
         for step in range(MAX_EP_STEP):
             env.render()
             a = RL.choose_action(s)
-            a = np.clip(np.random.normal(a, var, size=a.shape), *A_BOUND)     # clip according to bound
+            a = np.clip(np.random.normal(a, var, size=a.shape), *A_BOUND).astype(np.float32)     # clip according to bound
             s_, r, done, new_car_s = env.step(a.ravel())  # remove and add new cars
 
             ep_r += np.mean(r)
@@ -74,6 +74,7 @@ def twork(RL, stop_event, lock=None,):
                     running_r.append(ep_r)
                 else:
                     running_r.append(0.99*running_r[-1]+0.01*ep_r)
+                RL.ep_r = ep_r
                 print(
                     'Ep: %i' % i_ep,
                     '| RunningR: %.0f' % running_r[-1] if len(running_r) > 0 else 0.,
@@ -95,7 +96,7 @@ def load():
     env.set_fps(20)
     while True:
         s = env.reset()
-        while True:
+        for t in range(MAX_EP_STEP):
             env.render()
             a = RL.choose_action(s)
             s_, r, done, new_s = env.step(a.ravel())
@@ -111,8 +112,6 @@ def plot_running_r(n_car):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
-        TRAIN['train'] = int(sys.argv[1])
     print('Training..' if TRAIN['train'] else 'Testing..')
     RL = DDPG(
         s_dim=S_DIM, a_dim=A_DIM, a_bound=A_BOUND,

@@ -18,14 +18,14 @@ class Env(object):
     action_dim = 1
     state_dim = 6
     dt = 0.1    # driving refresh rate
-    ave_headway = 2    # used for the interval of generate car
+    ave_headway = 2.    # used for the interval of generate car
     safe_t_gap = 0.6     # s, (gap/v)
-    light_duration = {'red': 20., 'green': 20.}     # seconds
-    # safe_time_buffer = {'green_start': 2, 'green_end': -2}  # seconds   safety clip for green period
+    light_duration = {'red': 20., 'green': 20., 'yellow': 3.}     # seconds
+    # safe_time_buffer = 2.  # seconds   safety clip for green period
     car_l = 5.      # m
-    max_v = 60. / 3.6    # m/s
+    max_v = 110. / 3.6    # m/s
     car_num_limit = 200
-    max_p = 600     # meter
+    max_p = 1300     # meter
     light_p = max_p * .95
     viewer = None
 
@@ -61,6 +61,7 @@ class Env(object):
     def reset(self):
         self.t_gen = 0.  # counting time for generate car
         self.ncs = 0     # n car show
+        self.ave_headway = np.random.uniform(1.5, 4.)
         for key in self.car_info.dtype.names:
             v = 0. if key != 'pass_l' else False
             self.car_info[key].fill(v)
@@ -112,22 +113,25 @@ class Env(object):
             self.viewer.render()
 
     def sample_action(self):    # action (n_car_show, )
-        return np.random.uniform(*self.action_bound, self.ncs)
+        return np.random.uniform(*self.action_bound, self.ncs).astype(np.float32)
 
     def _check_change_light(self):
         self.t_light += self.dt
-        if self.is_red_light:
-            if self.t_light >= self.light_duration['red']:  # turn green
-                self.t_light -= self.light_duration['red']
+        if self.is_red_light:   # red
+            if self.t_light >= self.light_duration['red'] + self.light_duration['yellow']:  # turn green
+                self.t_light -= (self.light_duration['red'] + self.light_duration['yellow'])
                 self.is_red_light = False
                 if self.viewer is not None:
                     self.viewer.light.colors = self.viewer.color['green'] * 4
-        else:
+            elif self.t_light >= self.light_duration['yellow']:
+                if self.viewer is not None:
+                    self.viewer.light.colors = self.viewer.color['red'] * 4
+        else:   # green
             if self.t_light >= self.light_duration['green']:    # turn red
                 self.t_light -= self.light_duration['green']
                 self.is_red_light = True
                 if self.viewer is not None:
-                    self.viewer.light.colors = self.viewer.color['red'] * 4
+                    self.viewer.light.colors = self.viewer.color['yellow'] * 4
 
     def _get_state_norm(self, return_dx_d2l=False):
         """
@@ -178,31 +182,32 @@ class Env(object):
             return state_mat
 
     def _reward_08_17(self, dx, d2l):
+        r = np.empty_like(dx, dtype=np.float32)
         # speed reward
         v_r_max = 1.
         a = v_r_max / self.max_v
         v = self.car_info['v'][:self.ncs]
-        less_than_desired = v <= self.max_v
-        r = v * a
-        r[~less_than_desired] = -1.
+        more_than_desired = v > self.max_v
+        r[:] = v * a
+
+        # check run red
+        time2light = d2l / (v + 1e-4)
+        not_pass_light_last_step = ~self.car_info['pass_l'][:self.ncs]
+        if self.is_red_light:
+            t2g = (self.light_duration['yellow'] + self.light_duration['red']) - self.t_light
+            run_red = (time2light < t2g) & not_pass_light_last_step
+        else:
+            t2r = self.light_duration['green'] - self.t_light
+            t2g = t2r + (self.light_duration['red'] + self.light_duration['yellow'])
+            run_red = (time2light > t2r) & (time2light < t2g) & not_pass_light_last_step
+        r[run_red] = -.5
 
         # time gap reward
         time_gap = dx / (v + 1e-4)
         too_close = time_gap <= self.safe_t_gap
-        r = np.where(too_close, [-v_r_max], r)
+        r[too_close] = -v_r_max
 
-        # check run red
-
-        time2light = d2l / (v + 1e-4)
-        not_pass_light_last_step = ~self.car_info['pass_l'][:self.ncs]
-        if self.is_red_light:
-            t2g = self.light_duration['red'] - self.t_light
-            run_red = (time2light < t2g) & not_pass_light_last_step
-        else:
-            t2r = self.light_duration['green'] - self.t_light
-            t2g = t2r + self.light_duration['red']
-            run_red = (time2light > t2r) & (time2light < t2g) & not_pass_light_last_step
-        r[run_red] = -.1
+        r[more_than_desired] = -1.
         return r
 
     def _get_r_and_done(self, dx, d2l):
@@ -254,11 +259,12 @@ class Viewer(pyglet.window.Window):
     color = {
         'background': [100/255]*3 + [1],
         'red': [249, 67, 42],
-        'green': [74, 214, 49]
+        'green': [74, 214, 49],
+        'yellow': [255,255,0],
     }
     fps_display = pyglet.clock.ClockDisplay()
     car_img = pyglet.image.load('car.png')
-    display_game = True
+    display_game = False
 
     def __init__(self, car_num_limit, max_p, light_p, width=600, height=600,):
         super(Viewer, self).__init__(width, height, resizable=False, caption='RL_car', vsync=False)  # vsync=False to not use the monitor FPS
