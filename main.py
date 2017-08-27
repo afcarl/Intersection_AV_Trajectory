@@ -7,8 +7,8 @@ import time, threading, sys, subprocess, os, signal
 
 # TOTAL_EP = 900 # 800
 TOTAL_LEARN_STEP = 250000
-A_LR = 0.0003   # 0.0005
-C_LR = 0.0005    # 0.001
+A_LR = 0.0001   # 0.0005
+C_LR = 0.0002    # 0.001
 TAU = 0.005     # 0.005
 GAMMA = 0.95    # 0.95
 MEMORY_CAPACITY = 200000  # should consist of several episodes

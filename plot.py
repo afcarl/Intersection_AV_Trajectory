@@ -241,7 +241,7 @@ def plot_mix_traffic():
 if __name__ == '__main__':
     TRAJ_LW = 0.5
     LIGHT_LW = 5
-    MAX_P = 1300
+    MAX_P = 1200
     MODEL_DIR = './tf_models/0'
     if len(sys.argv) > 1:
         n = int(sys.argv[1])

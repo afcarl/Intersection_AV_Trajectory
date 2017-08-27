@@ -10,6 +10,7 @@ def sample(data, m_capacity, batch_size):
     indices = np.random.randint(0, m_capacity, size=batch_size)
     return data[indices]
 
+
 class DDPG(object):
     ep_r = 0.   # recode it in training
 
@@ -151,6 +152,7 @@ class DDPG(object):
         return self.sess.run(self.a, feed_dict={self.S: s})  # shape (n_cars, 1)
 
     def learn(self, lock=None):   # batch update
+        self.sess.run(self.update_target_op)  # soft update
         # indices = np.random.randint(self.memory_capacity, size=self.batch_size * self.update_times)
         if lock is not None: lock.acquire()
         self.batch_holder[:] = sample(self.memory, self.memory_capacity, int(self.batch_size*self.update_times))
@@ -160,8 +162,6 @@ class DDPG(object):
         s, a, r, s_ = self.batch_holder['s'], self.batch_holder['a'], self.batch_holder['r'], self.batch_holder['s_']
 
         for ut in range(self.update_times):
-            if ut % 5 == 0:
-                self.sess.run(self.update_target_op)  # soft update
             self.learn_counter += 1
             bs, ba, br, bs_ = s[ut * self.batch_size: (ut + 1) * self.batch_size], \
                               a[ut * self.batch_size: (ut + 1) * self.batch_size], \
@@ -254,8 +254,8 @@ class DDPGPrioritizedReplay(DDPG):
         return c_loss, ISWeights, abs_errors
 
     def learn(self, lock=None):   # batch update
+        self.sess.run(self.update_target_op)  # soft update target
         for _ in range(self.update_times):
-            self.sess.run(self.update_target_op)  # soft update target
             self.learn_counter += 1
             if lock is not None: lock.acquire()
             tree_idx, bt, ISWeights = self.memory.sample()
