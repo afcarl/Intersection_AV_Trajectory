@@ -18,27 +18,27 @@ class Env(object):
     action_dim = 1
     state_dim = 6
     dt = 0.1    # driving refresh rate
-    ave_headway = 2.    # used for the interval of generate car
-    safe_t_gap = 0.6     # s, (gap/v)
-    light_duration = {'red': 20., 'green': 20., 'yellow': 3.}     # seconds
-    # safe_time_buffer = 2.  # seconds   safety clip for green period
+    safe_t_gap = 0.4     # s, (gap/v)   (20/(20+20+3))=0.46
+    light_duration = {'red': 25., 'green': 25., 'yellow': 4.}     # seconds
     car_l = 5.      # m
     max_v = 110. / 3.6    # m/s
     car_num_limit = 200
-    max_p = 1300     # meter
-    light_p = max_p * .95
     viewer = None
 
-    def __init__(self):
+    def __init__(self, max_p=1500., ave_h=None, fix_start=False, random_light_dur=False):
         # position(m), velocity(m/s), passed_light, reward
         self.car_info = np.zeros(
             self.car_num_limit,
-            np.dtype(dict(names=['p', 'v', 'pass_l', 'r'], formats=[np.float32, np.float32, np.bool, np.float32])))
+            np.dtype(dict(names=['id', 'p', 'v', 'pass_l', 'r'], formats=[np.int32, np.float32, np.float32, np.bool, np.float32])))
         self.car_gen_default = dict(p=0., v=0.9 * self.max_v, pass_l=False, r=0)
         self.t_gen = 0.  # counting time for generate car
         self.t_light = 0.  # counting time for light change
         self.is_red_light = True  # red phase
-        self.ncs = 0        # n car show
+        self.ncs = 0         # n car show
+        self.default_headway = ave_h  # used for the interval of generate car
+        self.fix_start = fix_start
+        self.max_p = max_p    # meter
+        self.random_l_dur = random_light_dur
 
     def step(self, action):
         v = self.car_info['v'][:self.ncs]
@@ -61,13 +61,25 @@ class Env(object):
     def reset(self):
         self.t_gen = 0.  # counting time for generate car
         self.ncs = 0     # n car show
-        self.ave_headway = np.random.uniform(1.5, 4.)
+        if self.default_headway is None:
+            self.ave_headway = np.random.uniform(1., 4.)        # random headway range
+        else:
+            self.ave_headway = self.default_headway
         for key in self.car_info.dtype.names:
             v = 0. if key != 'pass_l' else False
             self.car_info[key].fill(v)
-        c = np.random.choice(['red', 'green'])
-        self.t_light = np.random.uniform(0, self.light_duration[c])  # counting time for light change
-        self.is_red_light = True if c == 'red' else False   # red phase
+
+        if self.fix_start:
+            self.t_light = 0.
+            self.is_red_light = True
+            c = 'red'
+        else:
+            if self.random_l_dur:
+                # random initial light
+                self.light_duration['red'] = self.light_duration['green'] = np.random.uniform(20, 40)
+            c = np.random.choice(['red', 'green'])
+            self.t_light = np.random.uniform(0, self.light_duration[c])  # counting time for light change
+            self.is_red_light = True if c == 'red' else False   # red phase
         if self.viewer is not None:
             self.viewer.light.colors = self.viewer.color[c] * 4
         s = self._gen_or_rm_car(orig_s=None)
@@ -80,15 +92,14 @@ class Env(object):
             if self.ncs != 0: self.t_gen -= self.ave_headway
             for key in self.car_gen_default:
                 self.car_info[key][self.ncs] = self.car_gen_default[key]
+            self.car_info['id'][self.ncs] = 0 if self.ncs == 0 else self.car_info['id'][self.ncs-1] + 1
             self.ncs += 1       # add one car
             car_changed = True
         self.t_gen += self.dt  # accumulate time
 
         # remove car
         if self.car_info['p'][0] >= self.max_p:
-            for k in self.car_info.dtype.names:
-                # self.car_info[k][0] *= 0
-                self.car_info[k] = np.roll(self.car_info[k], -1, axis=0)      # move the 1st row to last, keep its id in memory
+            self.car_info = np.roll(self.car_info, -1, axis=0)      # move the 1st row to last, keep its id in memory
             self.ncs -= 1    # remove one car on the road
             car_changed = True
 
@@ -136,10 +147,10 @@ class Env(object):
     def _get_state_norm(self, return_dx_d2l=False):
         """
         0. light_time      (cosine)
-        1. light_time derivative   (-sine)
+        1. light_time derivative   (cosine') (normalized)
         2. distance2light              (normalized)
-        3. dx     (exclude car length, normalized)
-        4. dv     (m/s)   (normalized)
+        3. dx     (leader - follower) (exclude car length, normalized)
+        4. dv     (follower - leader) (m/s)   (normalized)
         5. v      (m/s)   (normalized)
         """
         dl = self.light_p - self.car_info['p'][:self.ncs]   # distance to light
@@ -148,34 +159,38 @@ class Env(object):
 
         # t2rg_norm
         if self.is_red_light:
-            light_mapping = (self.t_light / self.light_duration['red']) * np.pi
-        else:  # decrease with the t_light counting
-            light_mapping = (self.t_light / self.light_duration['green']) * np.pi + np.pi
-        np.cos(light_mapping, out=state_mat[:, 0])  # light time
-        np.sin(-light_mapping, out=state_mat[:, 1])  # light time derivative
+            map_factor = np.pi / (self.light_duration['red'] + self.light_duration['yellow'])
+            light_mapping = self.t_light * map_factor
+        else:
+            map_factor = np.pi / self.light_duration['green']
+            light_mapping = self.t_light * map_factor + np.pi
+        # light time
+        np.cos(light_mapping, out=state_mat[:, 0])
+        # norm light time derivative
+        state_mat[:, 1] = map_factor * -np.sin(light_mapping) * 10.
+        # filter passed
         pass_light_indices = dl < 0
         state_mat[:, 0] = np.where(pass_light_indices, [-1.], state_mat[:, 0])     # pass light is given green light "-1"
         state_mat[:, 1] = np.where(pass_light_indices, [0.], state_mat[:, 1])
 
-        # distance2light_norm
+        # distance2light_norm (/1000)
         d2l = np.minimum(dl, 2000.)
         state_mat[:, 2] = np.where(pass_light_indices, [2.], d2l / 1000)  # pass light is given large distance to light
 
-        # dx_norm
-        dx_max = 100.    # meters if no preceding car      
+        # dx_norm (/100m)
+        dx_max = 100.    # meters if no preceding car
         dx = np.concatenate(([100.], -np.diff(self.car_info['p'][:self.ncs])-self.car_l))
         np.minimum(dx, 100., out=dx)     # exclude car length
         np.divide(dx, dx_max, out=state_mat[:, 3])
 
-        # dv_norm
+        # dv_norm (/10)
         state_mat[0, 4] = 0.
         state_mat[1:, 4] = np.diff(self.car_info['v'][:self.ncs])
         np.divide(state_mat[1:, 4],  10., out=state_mat[1:, 4])     # normalize
 
-        # v_norm
-        state_mat[:, 5] = self.car_info['v'][:self.ncs]
-        np.divide(state_mat[:, 5], self.max_v, out=state_mat[:, 5])
-        
+        # v_norm (/self.max_v)
+        np.divide(self.car_info['v'][:self.ncs], self.max_v, out=state_mat[:, 5])
+
         if return_dx_d2l:
             return state_mat, dx, d2l
         else:
@@ -200,7 +215,7 @@ class Env(object):
             t2r = self.light_duration['green'] - self.t_light
             t2g = t2r + (self.light_duration['red'] + self.light_duration['yellow'])
             run_red = (time2light > t2r) & (time2light < t2g) & not_pass_light_last_step
-        r[run_red] = -.5
+        r[run_red] = -1.
 
         # time gap reward
         time_gap = dx / (v + 1e-4)
@@ -237,22 +252,44 @@ class Env(object):
         plt.plot(h, r2)
         plt.show()
 
-    def plot_light_feature(self):
-        t = np.linspace(0, np.pi * 4, 200)
-        light_feature = np.cos(t)
-        light_derivative = np.sin(-t)
-        ax1 = plt.subplot(211)
-        plt.plot(t, light_feature)
+    def plot_light_feature(self, light_duration):
+        self.light_duration = light_duration
+        s = self.reset()
+        light, deri_light = [s[0,0]], [s[0,1]]
+        for t in range(sum(self.light_duration.values())*10):
+            s_, r, done, s = self.step(np.zeros((self.ncs,)))
+            light.append(s[self.ncs-1,0])
+            deri_light.append(s[self.ncs-1, 1])
+
+        ts = np.arange(len(light))/10
+        for i in [1,2]:
+            plt.subplot(2, 1, i)
+            tp = 0
+            tp_ = self.light_duration['yellow']
+            plt.plot([tp, tp_], [0, 0], c='y', lw=5, solid_capstyle="butt")
+            tp = tp_
+            tp_ += self.light_duration['red']
+            plt.plot([tp, tp_], [0, 0], c='r', lw=5, solid_capstyle="butt")
+            tp = tp_
+            tp_ += self.light_duration['green']
+            plt.plot([tp, tp_], [0, 0], c='g', lw=5, solid_capstyle="butt")
+        ax1 = plt.subplot(2, 1, 1)
+        plt.plot(ts, light, 'k')
         plt.setp(ax1.get_xticklabels(), visible=False)
         plt.ylabel('cos')
-        plt.subplot(212, sharex=ax1)
-        plt.plot(t, light_derivative)
-        plt.xticks((0, np.pi, 2*np.pi, 3*np.pi, 4*np.pi), ('0', '$\pi$', '$2\pi$', '$3\pi$', '$4\pi$'))
-        plt.ylabel('deri_cos')
+
+        plt.subplot(212)
+        plt.plot(ts, deri_light, 'k')
+        plt.xlabel('Time ($s$)')
+        plt.ylabel('deri_cos_norm')
         plt.show()
 
     def set_fps(self, fps=10):
         pyglet.clock.set_fps_limit(fps)
+
+    @property
+    def light_p(self):
+        return self.max_p * .95
 
 
 class Viewer(pyglet.window.Window):
@@ -360,17 +397,17 @@ class Car(pyglet.sprite.Sprite):
 
 if __name__ == '__main__':
     np.random.seed(1)
-    env = Env()
+    env = Env(fix_start=True)
     # env.plot_reward_func()
-    # env.plot_light_feature()
-    env.set_fps(60)
-
-    for i in range(100):
+    env.plot_light_feature(light_duration={'yellow': 3, 'red': 40, 'green': 40})
+    # env.set_fps(60)
+    for i in range(2):
         s = env.reset()
-        while True:
+        for _ in range(500):
             env.render()
             a = np.zeros((env.ncs, ))
             s_, r, done, s = env.step(a)
             # (t2rg, distance2light, dx, dv, v_norm)
             if done:
                 break
+

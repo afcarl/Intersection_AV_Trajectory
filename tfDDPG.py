@@ -2,20 +2,23 @@ import tensorflow as tf
 import numpy as np
 import os
 import shutil
+from numba import njit
 from memory import Memory
 
+@njit
+def sample(data, m_capacity, batch_size):
+    indices = np.random.randint(0, m_capacity, size=batch_size)
+    return data[indices]
 
 class DDPG(object):
-    log_dir = './log'
-    save_model_freq = 1000
-    ep_r = 0.
+    ep_r = 0.   # recode it in training
 
     def __init__(
             self,
             s_dim, a_dim, a_bound, a_lr=0.001, c_lr=0.001, tau=0.001, gamma=0.9,
             memory_capacity=5000, batch_size=64,
             train={'train': True, 'save_iter': None, 'load_point': -1},
-            model_dir='./tf_models', output_graph=True,
+            model_dir='./tf_models/0', log_dir='./log', output_graph=True,
         ):
         tf.reset_default_graph()
 
@@ -24,14 +27,16 @@ class DDPG(object):
         self.model_dir = model_dir
         self.batch_size = batch_size
         self.train_ = train
+        self.log_dir = log_dir
         self.learn_counter = 0
+        self.save_model_freq = 1000 if train.get('save_iter') is None else train['save_iter']
 
         self.memory_capacity = memory_capacity
         self.memory = np.empty(
             self.memory_capacity, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                          ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
         self.pointer = 0
-        self.update_times = 10
+        self.update_times = 20
         self.batch_holder = np.empty(
             self.batch_size*self.update_times, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                                       ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
@@ -75,7 +80,7 @@ class DDPG(object):
             if self.train_['load_point'] == -1:
                 ckpt = tf.train.get_checkpoint_state(self.model_dir, 'checkpoint').all_model_checkpoint_paths[-1]
             else:
-                ckpt = './torch_models/%i' % self.train_['load_point']
+                ckpt = self.model_dir + '/DDPG.ckpt-%i' % self.train_['load_point']
             self.saver.restore(self.sess, ckpt)
         else:
             self.sess.run(tf.global_variables_initializer())
@@ -103,6 +108,9 @@ class DDPG(object):
             net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
+            # net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            #                       trainable=trainable, name='l3')
+            # tf.summary.histogram('layer3', net)
 
             with tf.variable_scope('a'):
                 actions = tf.layers.dense(net, self.a_dim, activation=tf.nn.tanh, kernel_initializer=init_w,
@@ -131,6 +139,9 @@ class DDPG(object):
             net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
+            # net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            #                       trainable=trainable, name='l3')
+            # tf.summary.histogram('layer3', net)
             with tf.variable_scope('q'):
                 q = tf.layers.dense(net, 1, kernel_initializer=init_w, trainable=trainable)   # Q(s,a)
             tf.summary.histogram('q_value', q)
@@ -140,16 +151,17 @@ class DDPG(object):
         return self.sess.run(self.a, feed_dict={self.S: s})  # shape (n_cars, 1)
 
     def learn(self, lock=None):   # batch update
-        self.sess.run(self.update_target_op)    # soft update
-
-        indices = np.random.randint(self.memory_capacity, size=self.batch_size * self.update_times)
+        # indices = np.random.randint(self.memory_capacity, size=self.batch_size * self.update_times)
         if lock is not None: lock.acquire()
-        np.take(self.memory, indices, axis=0, out=self.batch_holder)
+        self.batch_holder[:] = sample(self.memory, self.memory_capacity, int(self.batch_size*self.update_times))
+        # np.take(self.memory, indices, axis=0, out=self.batch_holder)
         if lock is not None: lock.release()
 
         s, a, r, s_ = self.batch_holder['s'], self.batch_holder['a'], self.batch_holder['r'], self.batch_holder['s_']
 
         for ut in range(self.update_times):
+            if ut % 5 == 0:
+                self.sess.run(self.update_target_op)  # soft update
             self.learn_counter += 1
             bs, ba, br, bs_ = s[ut * self.batch_size: (ut + 1) * self.batch_size], \
                               a[ut * self.batch_size: (ut + 1) * self.batch_size], \
@@ -203,11 +215,12 @@ class DDPG(object):
             self.memory['s_'][:p_] = s_[-p_:]
         self.pointer = p_
 
-    def save(self):
-        if os.path.isdir(self.model_dir):
-            shutil.rmtree(self.model_dir)
-        os.mkdir(self.model_dir)
-        ckpt_path = os.path.join(self.model_dir, 'DDPG.ckpt')
+    def save(self, path=None):
+        path = path if path is not None else self.model_dir
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        os.mkdir(path)
+        ckpt_path = os.path.join(path, 'DDPG.ckpt')
         save_path = self.saver.save(self.sess, ckpt_path, global_step=self.learn_counter, write_meta_graph=False)
         print("\nSave Model %s\n" % save_path)
 
@@ -241,8 +254,8 @@ class DDPGPrioritizedReplay(DDPG):
         return c_loss, ISWeights, abs_errors
 
     def learn(self, lock=None):   # batch update
-        self.sess.run(self.update_target_op)    # soft update target
         for _ in range(self.update_times):
+            self.sess.run(self.update_target_op)  # soft update target
             self.learn_counter += 1
             if lock is not None: lock.acquire()
             tree_idx, bt, ISWeights = self.memory.sample()
