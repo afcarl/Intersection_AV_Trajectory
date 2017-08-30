@@ -6,7 +6,7 @@ import time, threading, sys, subprocess, os, signal
 
 
 # TOTAL_EP = 900 # 800
-TOTAL_LEARN_STEP = 250000
+TOTAL_LEARN_STEP = 300000
 A_LR = 0.0001   # 0.0005
 C_LR = 0.0002    # 0.001
 TAU = 0.005     # 0.005
@@ -69,7 +69,7 @@ def twork(RL, stop_event, n_val, lock=None):
             RL.store_transition(s, a, r, s_)
             if lock is not None: lock.release()
 
-            var = max([0.99999 * var, 0.5])  # keep exploring
+            var = max([0.99999 * var, 0.5])  # TODO: keep exploring
             global_step += 1
             if global_step % 100 == 0:      # record time
                 t100 = time.time()
@@ -122,7 +122,7 @@ if __name__ == '__main__':
         if len(sys.argv) > 1:
             VALS = [int(i) for i in list(sys.argv[1])]
         else:
-            VALS = [6]
+            VALS = [0]
         for i in VALS:
             RL = DDPG(
                 s_dim=S_DIM, a_dim=A_DIM, a_bound=A_BOUND,

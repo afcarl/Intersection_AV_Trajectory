@@ -37,7 +37,7 @@ class DDPG(object):
             self.memory_capacity, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                          ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
         self.pointer = 0
-        self.update_times = 20
+        self.update_times = 10
         self.batch_holder = np.empty(
             self.batch_size*self.update_times, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                                       ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
