@@ -14,18 +14,17 @@ def convert2pixel(meter):
 
 
 class Env(object):
-    action_bound = [-3, 2]
+    action_bound = [-5, 2]
     action_dim = 1
     state_dim = 6
     dt = 0.1    # driving refresh rate
-    safe_t_gap = 0.4     # s, (gap/v)   (20/(20+20+3))=0.46
     light_duration = {'red': 25., 'green': 25., 'yellow': 4.}     # seconds
     car_l = 5.      # m
     max_v = 110. / 3.6    # m/s
     car_num_limit = 200
     viewer = None
 
-    def __init__(self, max_p=1500., ave_h=None, fix_start=False, random_light_dur=False):
+    def __init__(self, max_p=1500., ave_h=None, fix_start=False, random_light_dur=False, safe_t_gap=None):
         # position(m), velocity(m/s), passed_light, reward
         self.car_info = np.zeros(
             self.car_num_limit,
@@ -39,6 +38,7 @@ class Env(object):
         self.fix_start = fix_start
         self.max_p = max_p    # meter
         self.random_l_dur = random_light_dur
+        self.safe_t_gap = 0.4 if safe_t_gap is None else safe_t_gap  # s, (gap/v)   (20/(20+20+3))=0.46
 
     def step(self, action):
         v = self.car_info['v'][:self.ncs]
@@ -398,7 +398,7 @@ class Car(pyglet.sprite.Sprite):
 if __name__ == '__main__':
     np.random.seed(1)
     env = Env(fix_start=True)
-    # env.plot_reward_func()
+    env.plot_reward_func()
     env.plot_light_feature(light_duration={'yellow': 3, 'red': 40, 'green': 40})
     # env.set_fps(60)
     for i in range(2):

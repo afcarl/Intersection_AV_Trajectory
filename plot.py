@@ -3,7 +3,7 @@ from tfDDPG import DDPG, DDPGPrioritizedReplay
 import numpy as np
 import matplotlib.pyplot as plt
 from numba import vectorize
-import sys, os
+import sys, os, time
 
 @vectorize('float32(float32, float32, float32)')
 def IDM(vn, delta_vn, delta_xn):
@@ -23,6 +23,7 @@ def av_loop(RL, env, return_light=True):
     pos = np.zeros((300, MAX_EP_STEP))
     pos[:] = pos.fill(np.nan)
     vel = pos.copy()
+    acc = pos.copy()
     if return_light:
         red_t, yellow_t = [], []
     while t < MAX_EP_STEP:
@@ -30,11 +31,14 @@ def av_loop(RL, env, return_light=True):
         while True:
             # env.render()
             a = RL.choose_action(s)
-            s_, r, done, new_s = env.step(a.ravel())
-            s = new_s
+
             envp, envid, envv = env.car_info['p'][:env.ncs], env.car_info['id'][:env.ncs], env.car_info['v'][:env.ncs]
             pos[envid, t] = envp
             vel[envid, t] = envv
+            acc[envid, t] = np.where(envv <= 0, 0., a.ravel())
+
+            s_, r, done, new_s = env.step(a.ravel())
+            s = new_s
 
             if return_light:
                 if env.is_red_light and (env.t_light >= env.light_duration['yellow']):
@@ -51,15 +55,16 @@ def av_loop(RL, env, return_light=True):
                 break
 
     if return_light:
-        return pos, vel, red_t, yellow_t
+        return pos, vel, acc, red_t, yellow_t
     else:
-        return pos, vel
+        return pos, vel, acc
 
 
 def mv_loop(env):
     pos = np.zeros((300, MAX_EP_STEP))
     pos[:] = pos.fill(np.nan)
     vel = pos.copy()
+    acc = pos.copy()
     t = 0
     while t < MAX_EP_STEP:
         s = env.reset()
@@ -71,37 +76,42 @@ def mv_loop(env):
                 dv = np.where(dx > d2l, v, dv)
                 np.minimum(dx, d2l, out=dx)
             a = IDM(v, dv, dx)
-            s_, r, done, new_s = env.step(a)
-            s = new_s
+
             envp, envid, envv = env.car_info['p'][:env.ncs], env.car_info['id'][:env.ncs], env.car_info['v'][:env.ncs]
             pos[envid, t] = envp
             vel[envid, t] = envv
+            acc[envid, t] = np.where(envv <= 0, [0], a)
+
+            s_, r, done, new_s = env.step(a)
+            s = new_s
             t += 1
             if done or t == MAX_EP_STEP:
                 break
-    return pos, vel
+    return pos, vel, acc
 
 
 def plot_av_mv():
-    env = Env(max_p=MAX_P, ave_h=2, fix_start=True)
+    ave_h = 2.
+    env = Env(max_p=MAX_P, ave_h=ave_h, fix_start=True)
     env.set_fps(1000)
     rl = DDPG(
         s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
         train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
     # av test
-    av_pos, av_vel, red_t, yellow_t = av_loop(rl, env, return_light=True)
+    av_pos, av_vel, av_acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
     # mv test
-    mv_pos, mv_vel = mv_loop(env)
+    mv_pos, mv_vel, mv_acc = mv_loop(env)
 
-    plt.figure(1, figsize=(6, 8))
-    ax1 = plt.subplot(211)
+    # position
+    plt.figure(1, figsize=(18, 8))
+    ax1 = plt.subplot(241)
     plt.title('(a) MVs benchmark')
     plt.plot(mv_pos.T, c='k', alpha=0.8, lw=TRAJ_LW, solid_capstyle="butt")
     plt.plot(np.arange(len(red_t)), red_t, 'r', lw=LIGHT_LW, solid_capstyle="butt")
     plt.plot(np.arange(len(yellow_t)), yellow_t, c='y', lw=LIGHT_LW, solid_capstyle="butt")
     plt.ylabel('Position ($m$)')
 
-    plt.subplot(212, sharex=ax1, sharey=ax1)
+    plt.subplot(245, sharex=ax1, sharey=ax1)
     plt.title('(b) AVs case')
     plt.plot(av_pos.T, c='k', alpha=0.8, lw=TRAJ_LW, solid_capstyle="butt")
     plt.plot(np.arange(len(red_t)), red_t, 'r', lw=LIGHT_LW, solid_capstyle="butt")
@@ -111,6 +121,78 @@ def plot_av_mv():
     plt.xticks(np.arange(0, MAX_EP_STEP, 500), (np.arange(0, MAX_EP_STEP, 500)/10).astype(np.int32))
     plt.xlim(xmin=0, xmax=MAX_EP_STEP)
     plt.ylim(ymin=0)
+    # plt.tight_layout()
+
+    # speed
+    for i_subp, vel in enumerate([mv_vel, av_vel], start=1):
+        if i_subp == 1:
+            ax1 = plt.subplot(2, 4, 2)
+        else:
+            plt.subplot(2, 4, 6, sharex=ax1)
+        mean_v = np.nanmean(vel, axis=0) * 3.6
+        plt.title('(%s) %s' % (chr(i_subp + 98), ['MVs benchmark', 'AVs case'][i_subp-1]))
+        plt.plot(mean_v, c='k')
+        red_t = np.array(red_t)
+        yellow_t = np.array(yellow_t)
+        green_t = np.isnan(yellow_t) & np.isnan(red_t)
+        red_t[~np.isnan(red_t)] = mean_v.min()
+        yellow_t[~np.isnan(yellow_t)] = mean_v.min()
+        green_t = np.where(green_t, mean_v.min(), np.nan)
+        plt.plot(np.arange(len(red_t)), red_t, 'r', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(yellow_t)), yellow_t, c='y', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(green_t)), green_t, c='g', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.ylabel('Average speed ($km/h$)')
+        # plt.yticks(rotation=45)
+        plt.ylim((0, 110))
+        plt.xticks(np.arange(0, MAX_EP_STEP, 500), (np.arange(0, MAX_EP_STEP, 500) / 10).astype(np.int32))
+    # plt.tight_layout()
+
+    # time gap
+    for i_subp, (vel, pos) in enumerate(zip([mv_vel, av_vel], [mv_pos, av_pos]), start=1):
+        if i_subp == 1:
+            ax1 = plt.subplot(2, 4, 3)
+        else:
+            plt.subplot(2, 4, 7, sharex=ax1)
+        dx = -np.diff(pos, axis=0)
+        time_gap = dx / (vel[1:] + 1e-3)
+        min_t_gap = np.nanmin(time_gap, axis=0)
+        plt.title('(%s) %s' % (chr(i_subp + 100), ['MVs benchmark', 'AVs case'][i_subp - 1]))
+        plt.plot(min_t_gap, c='k')
+        red_t = np.array(red_t)
+        yellow_t = np.array(yellow_t)
+        green_t = np.isnan(yellow_t) & np.isnan(red_t)
+        red_t[~np.isnan(red_t)] = np.nanmin(min_t_gap)
+        yellow_t[~np.isnan(yellow_t)] = np.nanmin(min_t_gap)
+        green_t = np.where(green_t, np.nanmin(min_t_gap), np.nan)
+        plt.plot(np.arange(len(red_t)), red_t, 'r', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(yellow_t)), yellow_t, c='y', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(green_t)), green_t, c='g', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.ylabel('Minimum time gap ($km/h$)')
+        plt.ylim((0.5, 2.5))
+        plt.xticks(np.arange(0, MAX_EP_STEP, 500), (np.arange(0, MAX_EP_STEP, 500) / 10).astype(np.int32))
+    # plt.tight_layout()
+
+    # acceleration
+    for i_subp, acc in enumerate([mv_acc, av_acc], start=1):
+        if i_subp == 1:
+            ax1 = plt.subplot(2, 4, 4)
+        else:
+            plt.subplot(2, 4, 8, sharex=ax1)
+        std_acc = np.nanstd(acc, axis=0)
+        plt.title('(%s) %s' % (chr(i_subp + 102), ['MVs benchmark', 'AVs case'][i_subp - 1]))
+        plt.plot(std_acc, c='k')
+        red_t = np.array(red_t)
+        yellow_t = np.array(yellow_t)
+        green_t = np.isnan(yellow_t) & np.isnan(red_t)
+        red_t[~np.isnan(red_t)] = np.nanmin(std_acc)
+        yellow_t[~np.isnan(yellow_t)] = np.nanmin(std_acc)
+        green_t = np.where(green_t, np.nanmin(std_acc), np.nan)
+        plt.plot(np.arange(len(red_t)), red_t, 'r', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(yellow_t)), yellow_t, c='y', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.plot(np.arange(len(green_t)), green_t, c='g', lw=LIGHT_LW, solid_capstyle="butt")
+        plt.ylabel('Standard deviation of acceleration')
+        plt.xticks(np.arange(0, MAX_EP_STEP, 500), (np.arange(0, MAX_EP_STEP, 500) / 10).astype(np.int32))
+        plt.ylim((0, 4))
     plt.tight_layout()
     plt.show()
 
@@ -124,7 +206,7 @@ def plot_av_diff_h(h_list):
 
     for i_subf, h in enumerate(h_list, start=1):
         env = Env(max_p=MAX_P, ave_h=h, fix_start=True)
-        pos, vel, red_t, yellow_t = av_loop(rl, env, return_light=True)
+        pos, vel, acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
 
         # position statics
         plt.figure(1, figsize=(6, 8))
@@ -198,7 +280,7 @@ def av_diff_light_duration(l_duration):
     for i_subf, r_dur in enumerate(l_duration, start=1):
         l_dur = {'red': r_dur, 'green': r_dur, 'yellow': env.light_duration['yellow']}
         env.light_duration = l_dur
-        pos, vel, red_t, yellow_t = av_loop(rl, env, return_light=True)
+        pos, vel, acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
         if i_subf == 1:
             ax0 = plt.subplot(len(l_duration), 1, i_subf)
         else:
@@ -316,7 +398,7 @@ if __name__ == '__main__':
         if len(sys.argv) == 3:
             MODEL_DIR = MODEL_DIR[:-1] + sys.argv[2]
     else:
-        n = 1
+        n = 0
 
     config = [
         dict(fun=plot_av_mv,                # 0
@@ -331,4 +413,6 @@ if __name__ == '__main__':
              kwargs={'av_rate': np.arange(0, 1.1, 0.25)}),
     ][n]
 
+    t0 = time.time()
     config['fun'](**config['kwargs'])
+    print(time.time()-t0)

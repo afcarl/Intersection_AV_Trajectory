@@ -4,23 +4,44 @@ from tfDDPG import DDPG, DDPGPrioritizedReplay
 import numpy as np
 import time, threading, sys, subprocess, os, signal
 
-
-# TOTAL_EP = 900 # 800
+# Setting 1
+# Fixed headway/light/, no to much time gap, max efficiency
 TOTAL_LEARN_STEP = 300000
-A_LR = 0.0001   # 0.0005
-C_LR = 0.0002    # 0.001
+A_LR = 0.0002   # 0.0005
+C_LR = 0.0005    # 0.001
 TAU = 0.005     # 0.005
 GAMMA = 0.95    # 0.95
-MEMORY_CAPACITY = 200000  # should consist of several episodes
-BATCH_SIZE = 32
-MAX_EP_STEP = 1000
-RANDOM_LIGHT = True
+AVERAGE_H = 2.
+SAFE_T_GAP = 0.6
+RANDOM_LIGHT = False
 MAX_P = 1200
+MAX_EP_STEP = 1000
+MEMORY_CAPACITY = 1000000  # should consist of several episodes
+BATCH_SIZE = 32
+
+
+# Setting 2
+# covering various situations
+# TOTAL_LEARN_STEP = 300000
+# A_LR = 0.0002   # 0.0005
+# C_LR = 0.0005    # 0.001
+# TAU = 0.005     # 0.005
+# GAMMA = 0.95    # 0.95
+# # what changed >>>>>>
+# AVERAGE_H = None
+# SAFE_T_GAP = None
+# RANDOM_LIGHT = True
+# MAX_P = 1200
+# MAX_EP_STEP = 1000
+# MEMORY_CAPACITY = 1000000  # should consist of several episodes
+# BATCH_SIZE = 32
+
+
 TRAIN = {'train': True, 'save_iter': None, 'load_point': -1}
 MODEL_PARENT_DIR = './tf_models'
 LOAD_PATH = './tf_models/0'
 
-env = Env(max_p=MAX_P, random_light_dur=RANDOM_LIGHT)
+env = Env(max_p=MAX_P, ave_h=AVERAGE_H, random_light_dur=RANDOM_LIGHT, safe_t_gap=SAFE_T_GAP)
 env.set_fps(1000)
 A_DIM = env.action_dim
 S_DIM = env.state_dim
