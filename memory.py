@@ -82,9 +82,9 @@ class Memory(object):  # stored as ( s, a, r, s_ ) in SumTree
     https://github.com/jaara/AI-blog/blob/master/Seaquest-DDQN-PER.py
     """
     epsilon = 0.01  # small amount to avoid zero priority
-    alpha = 0.6  # [0~1] convert the importance of TD error to priority
+    alpha = 0.4  # [0~1] convert the importance of TD error to priority
     beta = 0.4  # importance-sampling, from initial value increasing to 1
-    beta_increment_per_sampling = 0.00001
+    beta_increment_per_sampling = 0.0001
     abs_err_upper = 1.  # clipped abs error
 
     def __init__(self, capacity, batch_size, s_dim, a_dim):
@@ -105,9 +105,9 @@ class Memory(object):  # stored as ( s, a, r, s_ ) in SumTree
 
     def sample(self):
         pri_seg = self.tree.total_p / self.batch_size       # priority segment
-        self.beta = np.min([1., self.beta + self.beta_increment_per_sampling])  # max = 1
+        self.beta = np.minimum(1., self.beta + self.beta_increment_per_sampling)  # max = 1
 
-        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_p  # for later calculate ISweight
+        min_prob = np.min(self.tree.tree[-self.tree.capacity:]) / self.tree.total_p
         for i in range(self.batch_size):
             a, b = pri_seg * i, pri_seg * (i + 1)
             v = np.random.uniform(a, b)

@@ -37,7 +37,7 @@ class DDPG(object):
             self.memory_capacity, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                          ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
         self.pointer = 0
-        self.update_times = 20  # TODO: inner loop for update
+        self.update_times = 1  # TODO: inner loop for update
         self.batch_holder = np.empty(
             self.batch_size*self.update_times, dtype=[('s', np.float32, (s_dim,)), ('a', np.float32, (a_dim,)),
                                                       ('r', np.float32, (1,)), ('s_', np.float32, (s_dim,))])
@@ -68,12 +68,12 @@ class DDPG(object):
         c_loss, self.ISWeights, self.abs_errors = self._class_depended_graph(target_q, q)      # self.ISWeights and abs_loss is None here
 
         with tf.variable_scope('C_train'):
-            self.c_train_op = tf.train.AdamOptimizer(c_lr).minimize(c_loss, var_list=ce_params)
+            self.c_train_op = tf.train.RMSPropOptimizer(c_lr).minimize(c_loss, var_list=ce_params)
         with tf.variable_scope('a_loss'):
             policy_loss = -tf.reduce_mean(q)# - 0.01*tf.square(self.a))    # TODO: acceleration penalty
             tf.summary.scalar('actor_loss', policy_loss)
         with tf.variable_scope('A_train'):
-            self.a_train_op = tf.train.AdamOptimizer(a_lr).minimize(policy_loss, var_list=ae_params)
+            self.a_train_op = tf.train.RMSPropOptimizer(a_lr).minimize(policy_loss, var_list=ae_params)
 
         self.sess = tf.Session()
         self.saver = tf.train.Saver(max_to_keep=100)
@@ -88,7 +88,7 @@ class DDPG(object):
 
         if output_graph:
             if os.path.exists(self.log_dir):
-                shutil.rmtree(self.log_dir)
+                shutil.rmtree(self.log_dir, ignore_errors=True)
             self.merged = tf.summary.merge_all()
             self.writer = tf.summary.FileWriter(self.log_dir, self.sess.graph)
 
@@ -101,7 +101,7 @@ class DDPG(object):
     def _build_a_net(self, s, scope, trainable):
         with tf.variable_scope(scope):
             init_w = tf.truncated_normal_initializer(0., 0.1)
-            init_b = tf.constant_initializer(0.01)
+            init_b = tf.constant_initializer(0.1)
             net = tf.layers.dense(s, 256, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l1')
@@ -109,9 +109,9 @@ class DDPG(object):
             net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
-            # net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
-            #                       trainable=trainable, name='l3')
-            # tf.summary.histogram('layer3', net)
+            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+                                  trainable=trainable, name='l3')
+            tf.summary.histogram('layer3', net)
 
             with tf.variable_scope('a'):
                 actions = tf.layers.dense(net, self.a_dim, activation=tf.nn.tanh, kernel_initializer=init_w,
@@ -127,7 +127,7 @@ class DDPG(object):
     def _build_c_net(self, s, a, scope, trainable):
         with tf.variable_scope(scope):
             init_w = tf.truncated_normal_initializer(0., 0.1)
-            init_b = tf.constant_initializer(0.01)
+            init_b = tf.constant_initializer(0.1)
 
             with tf.variable_scope('l1'):
                 n_l1 = 256
@@ -140,9 +140,9 @@ class DDPG(object):
             net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
-            # net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
-            #                       trainable=trainable, name='l3')
-            # tf.summary.histogram('layer3', net)
+            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+                                  trainable=trainable, name='l3')
+            tf.summary.histogram('layer3', net)
             with tf.variable_scope('q'):
                 q = tf.layers.dense(net, 1, kernel_initializer=init_w, trainable=trainable)   # Q(s,a)
             tf.summary.histogram('q_value', q)
@@ -151,13 +151,11 @@ class DDPG(object):
     def choose_action(self, s):
         return self.sess.run(self.a, feed_dict={self.S: s})  # shape (n_cars, 1)
 
-    def learn(self, lock=None):   # batch update
+    def learn(self):   # batch update
         self.sess.run(self.update_target_op)  # soft update
         # indices = np.random.randint(self.memory_capacity, size=self.batch_size * self.update_times)
-        if lock is not None: lock.acquire()
         self.batch_holder[:] = sample(self.memory, self.memory_capacity, int(self.batch_size*self.update_times))
         # np.take(self.memory, indices, axis=0, out=self.batch_holder)
-        if lock is not None: lock.release()
 
         s, a, r, s_ = self.batch_holder['s'], self.batch_holder['a'], self.batch_holder['r'], self.batch_holder['s_']
 
@@ -184,9 +182,9 @@ class DDPG(object):
                 save_path = self.saver.save(self.sess, ckpt_path, global_step=self.learn_counter, write_meta_graph=False)
                 print("\nSave Model %s\n" % save_path)
 
-    def threadlearn(self, stop_event, lock=None):
+    def threadlearn(self, stop_event):
         while not stop_event.is_set():
-            self.learn(lock)
+            self.learn()
 
     def store_transition(self, s, a, r, s_):
         for item in [s,a,r,s_]:
@@ -195,8 +193,8 @@ class DDPG(object):
             a = a[:, None]
         if r.ndim < 2:
             r = r[:, None]
-        s = np.ascontiguousarray(s)
-        s_ = np.ascontiguousarray(s_)
+        # s = np.ascontiguousarray(s)
+        # s_ = np.ascontiguousarray(s_)
         p_ = self.pointer + r.size
         if p_ <= self.memory_capacity:
             self.memory['s'][self.pointer:p_] = s
@@ -234,13 +232,13 @@ class DDPGPrioritizedReplay(DDPG):
             s_dim, a_dim, a_bound, a_lr=0.001, c_lr=0.001, tau=0.001, gamma=0.9,
             memory_capacity=5000, batch_size=64,
             train={'train': True, 'save_iter': None, 'load_point': -1},
-            model_dir='./tf_models', output_graph=True,
+            model_dir='./tf_models', log_dir='./log', output_graph=True,
     ):
         super(DDPGPrioritizedReplay, self).__init__(
             s_dim=s_dim, a_dim=a_dim, a_bound=a_bound, a_lr=a_lr, c_lr=c_lr,
             tau=tau, gamma=gamma, memory_capacity=memory_capacity, batch_size=batch_size,
             train=train,
-            model_dir=model_dir, output_graph=output_graph,
+            model_dir=model_dir, log_dir=log_dir, output_graph=output_graph,
         )
         self.memory = Memory(self.memory_capacity, self.batch_size, self.s_dim, self.a_dim)
 
@@ -272,6 +270,6 @@ class DDPGPrioritizedReplay(DDPG):
             a = a[:, None]
         if r.ndim < 2:
             r = r[:, None]
-        s = np.ascontiguousarray(s)
-        s_ = np.ascontiguousarray(s_)
+        # s = np.ascontiguousarray(s)
+        # s_ = np.ascontiguousarray(s_)
         self.memory.store(s, a, r, s_)
