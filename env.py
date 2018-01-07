@@ -21,7 +21,7 @@ class Env(object):
     dt = 0.5    # driving refresh rate
     light_duration = {'yellow': 5, 'red': 40, 'green': 40}    # seconds
     random_light_range = (15., 50.)
-    random_headway_range = (1.8, 4.)
+    random_headway_range = (1.8, 5.)
     car_l = 5.      # m
     max_v = 110. / 3.6    # m/s
     car_num_limit = 300
@@ -245,6 +245,8 @@ class Env(object):
         r[:] = v * a
         r[more_than_desired] -= 1.
 
+
+
         # time gap reward
         time_gap = dx / (v + 1e-4)
         too_close = time_gap <= self.safe_t_gap
@@ -253,17 +255,30 @@ class Env(object):
         # check run red
         time2light = d2l / (v + 1e-4)
         not_pass_light_last_step = ~self.car_info['pass_l'][:self.ncs]
+        green_buffer = 5.       # second
+
         if self.is_red_light:
             t2g = (self.light_duration['yellow'] + self.light_duration['red']) - self.t_light
             run_red = (time2light < t2g) & not_pass_light_last_step
+            time_tmp = time2light - t2g
+            in_safe_zone = (time_tmp > green_buffer) & \
+                           (time_tmp < self.light_duration['green']-green_buffer) & not_pass_light_last_step
             # x = (self.t_light+time2light)/(self.light_duration['yellow'] + self.light_duration['red'])*np.pi
         else:
             t2r = self.light_duration['green'] - self.t_light
             t2g = t2r + (self.light_duration['red'] + self.light_duration['yellow'])
             run_red = (time2light > t2r) & (time2light < t2g) & not_pass_light_last_step
+            time_tmp1 = t2r - time2light
+            time_tmp2 = time2light - (t2r + self.light_duration['yellow'] + self.light_duration['red'])
+            in_safe_zone = ((time_tmp1 > green_buffer)
+                            | (
+                                (time_tmp2 > green_buffer)
+                                & (time_tmp2 < self.light_duration['green']-green_buffer))
+                            ) & not_pass_light_last_step
             # x = (time2light-t2r)/(self.light_duration['yellow'] + self.light_duration['red'])*np.pi
         # r[run_red] -= (np.sin(x[run_red])+1.)
         r[run_red] = -1.
+        r[in_safe_zone] += .1
         return r
 
     def _get_r_and_done(self, dx, d2l):
@@ -525,15 +540,15 @@ class Car(pyglet.sprite.Sprite):
 if __name__ == '__main__':
     np.random.seed(1)
     env = Env(fix_start=False)
-    SAVE_FIG = True
+    # SAVE_FIG = True
     # env = CrashEnv()
-    env.plot_reward_func()
+    # env.plot_reward_func()
     # env.plot_light_feature(light_duration={'yellow': 5, 'red': 40, 'green': 40})
     env.set_fps(60)
-    for i in range(11):
+    for i in range(111111):
         s = env.reset()
-        for _ in range(100):
-            # env.render()
+        for _ in range(1011110):
+            env.render()
             a = np.zeros((env.ncs, ))
             s_, r, done, s = env.step(a)
             # (t2rg, distance2light, dx, dv, v_norm)

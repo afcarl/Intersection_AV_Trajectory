@@ -217,7 +217,7 @@ class DDPG(object):
         path = path if path is not None else self.model_dir
         if os.path.isdir(path):
             shutil.rmtree(path)
-        os.mkdir(path)
+        os.makedirs(path,)
         ckpt_path = os.path.join(path, 'DDPG.ckpt')
         save_path = self.saver.save(self.sess, ckpt_path, global_step=self.learn_counter, write_meta_graph=False)
         print("\nSave Model %s\n" % save_path)

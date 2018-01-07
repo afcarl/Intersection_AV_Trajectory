@@ -483,7 +483,7 @@ def plot_av_diff_h(h_list):
 
 
 def av_diff_light_duration(l_duration):
-    env = Env(light_p=LIGHT_P, ave_h=2.5, fix_start=True)
+    env = Env(light_p=LIGHT_P, ave_h=DEFAULT_H, fix_start=True)
     rl = DDPG(
         s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
         train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
@@ -532,7 +532,7 @@ def plot_reward(parent_path):
 
 
 def plot_mix_traffic(av_rate):
-    env = Env(light_p=LIGHT_P, ave_h=2.4, fix_start=True)
+    env = Env(light_p=LIGHT_P, ave_h=DEFAULT_H, fix_start=True)
     fdx = env.feature_info["dx"]
     fdv = env.feature_info["dv"]
     fv = env.feature_info["v"]
@@ -1368,6 +1368,7 @@ if __name__ == '__main__':
     TRAJ_LW = 0.4
     LIGHT_LW = 3
     LIGHT_P = 1500
+    DEFAULT_H = 3.
     MODEL_DIR = './tf_models/1'
     MAX_EP_STEP = int(380 / ENV.dt)
     SAVE_FIG = False
@@ -1376,13 +1377,13 @@ if __name__ == '__main__':
         if len(sys.argv) == 3:
             MODEL_DIR = MODEL_DIR[:-1] + sys.argv[2]
     else:
-        n = 1
+        n = 2
 
     config = [
         dict(fun=plot_av_mv,                # 0
-             kwargs={"ave_h": 2.4}),    # 1500 veh/h
+             kwargs={"ave_h": 3.}),    # 1500 veh/h
         dict(fun=plot_av_diff_h,            # 1
-             kwargs={'h_list': [4., 3., 2.4],}),
+             kwargs={'h_list': [5., 4., 3.],}),
         dict(fun=av_diff_light_duration,    # 2
              kwargs={'l_duration': [35, 30, 25]}),
         dict(fun=plot_reward,               # 3

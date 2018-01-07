@@ -17,13 +17,13 @@ SAFE_T_GAP = 0.8    # no use for now
 RANDOM_LIGHT = True
 LIGHT_P = 1500
 MAX_CEP_STEP = 50
-MEMORY_CAPACITY = 1000000  # should consist of several episodes
+MEMORY_CAPACITY = 500000  # should consist of several episodes
 BATCH_SIZE = 64
 
 
 TRAIN = {'train': 1, 'save_iter': None, 'load_point': -1, "threading": True}
 MODEL_PARENT_DIR = './tf_models'
-LOAD_PATH = './tf_models/0'
+LOAD_PATH = './tf_models/1'
 
 env = Env(light_p=LIGHT_P, ave_h=AVERAGE_H, random_light_dur=RANDOM_LIGHT, safe_t_gap=SAFE_T_GAP)
 crash_env = CrashEnv(light_p=LIGHT_P, safe_t_gap=SAFE_T_GAP)
