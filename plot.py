@@ -49,7 +49,9 @@ def color_loop(pos, vel):
     for i in range(pos.shape[0]):
         if np.all(np.isnan(pos[i, :])):
             break
-        colorline(np.arange(pos.shape[1]), pos[i, :], (1-vel[i, :] / ENV.max_v)/2,
+        not_nan_idx = (~np.isnan(pos[i])) & (~np.isnan(vel[i]))
+        pos_, vel_ = pos[i, not_nan_idx], vel[i, not_nan_idx]
+        colorline(np.arange(pos.shape[1])[not_nan_idx], pos_, (1-vel_ / ENV.max_v)/2,
                   linewidth=TRAJ_LW, cmap='brg', alpha=0.7)
 
 @njit
@@ -1465,7 +1467,10 @@ if __name__ == '__main__':
     parser.add_argument('-p', '--plot_n', type=int, nargs='+', default=[1, 2], choices=range(10),
                         help='The plot function number')
     parser.add_argument('-o', '--output', action='store_true')
-    args = parser.parse_args()
+
+    args = parser.parse_args(
+        args='-m 0 -p 1'.split()
+    )
     for model_n in args.model_n:
         MODEL_DIR = './tf_models/%s' % model_n
         SAVE_FIG = args.output
