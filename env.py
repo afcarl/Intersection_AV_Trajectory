@@ -20,8 +20,8 @@ class Env(object):
 
     dt = 0.5    # driving refresh rate
     light_duration = {'yellow': 5, 'red': 40, 'green': 40}    # seconds
-    random_light_range = (15., 50.)
-    random_headway_range = (1.8, 5.)
+    random_light_range = (15., 60.)
+    random_headway_range = (2., 5.)
     car_l = 5.      # m
     max_v = 110. / 3.6    # m/s
     car_num_limit = 300
@@ -245,8 +245,6 @@ class Env(object):
         r[:] = v * a
         r[more_than_desired] -= 1.
 
-
-
         # time gap reward
         time_gap = dx / (v + 1e-4)
         too_close = time_gap <= self.safe_t_gap
@@ -255,7 +253,7 @@ class Env(object):
         # check run red
         time2light = d2l / (v + 1e-4)
         not_pass_light_last_step = ~self.car_info['pass_l'][:self.ncs]
-        green_buffer = 5.       # second
+        green_buffer = 3.       # second
 
         if self.is_red_light:
             t2g = (self.light_duration['yellow'] + self.light_duration['red']) - self.t_light

@@ -3,11 +3,20 @@ from tfDDPG import DDPG, DDPGPrioritizedReplay
 import numpy as np
 import matplotlib.pyplot as plt
 from numba import vectorize, njit
-import sys, os, time
+import os, time, argparse
 from ColorLine import colorline
 
 
 ENV = Env()
+TRAJ_LW = 0.4
+LIGHT_LW = 3
+LIGHT_P = 1500
+DEFAULT_H = 4.
+MAX_EP_STEP = int(380 / ENV.dt)
+STATE_DIM = ENV.state_dim
+ACTION_DIM = ENV.action_dim
+ACTION_BOUND = ENV.action_bound
+
 
 Kij = np.array([
     [   # positive acceleration
@@ -224,12 +233,15 @@ def mv_loop(env, return_light=False):
         return pos, vel, acc
 
 
-def plot_av_mv(ave_h=2.):
+def plot_av_mv(ave_h):
+    rl = DDPG(
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
+        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
+
     env = Env(light_p=LIGHT_P, ave_h=ave_h, fix_start=True)
     env.set_fps(1000)
-    rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
-        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+
     # av test
     av_pos, av_vel, av_acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
     # mv test
@@ -397,17 +409,21 @@ def plot_av_mv(ave_h=2.):
         plt.xlim((0, MAX_EP_STEP))
     plt.tight_layout()
     if SAVE_FIG:
-        fig1.savefig('./results/fuel_safe.png', format='png', dpi=700)
-        fig2.savefig('./results/pvh.png', format='png', dpi=700)
+        fig1.savefig('./results/fuel_safe%i.png' % model_n, format='png', dpi=700)
+        fig2.savefig('./results/pvh%i.png' % model_n, format='png', dpi=700)
+        plt.close(fig1)
+        plt.close(fig2)
+        print('saved fuel_safe.png, pvh.png')
     else:
         plt.show()
 
 
 def plot_av_diff_h(h_list):
-    env = Env(light_p=LIGHT_P, ave_h=3., fix_start=True)
     rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
         train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
+    env = Env(light_p=LIGHT_P, ave_h=3., fix_start=True)
     del env
 
     for i_subf, h in enumerate(h_list, start=1):
@@ -476,19 +492,23 @@ def plot_av_diff_h(h_list):
     plt.xlim(xmin=0, xmax=MAX_EP_STEP)
     plt.tight_layout()
     if SAVE_FIG:
-        fig1.savefig('./results/headways_p.png', format='png', dpi=500)
-        fig2.savefig('./results/headways_v.png', format='png', dpi=500)
+        fig1.savefig('./results/headways_p%i.png' % model_n, format='png', dpi=500)
+        fig2.savefig('./results/headways_v%i.png' % model_n, format='png', dpi=500)
+        plt.close(fig1)
+        plt.close(fig2)
+        print('saved headways_p, headways_v')
     else:
         plt.show()
 
 
 def av_diff_light_duration(l_duration):
-    env = Env(light_p=LIGHT_P, ave_h=DEFAULT_H, fix_start=True)
     rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
         train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
+    env = Env(light_p=LIGHT_P, ave_h=DEFAULT_H, fix_start=True)
 
-    plt.figure(1, figsize=(6, 8))
+    fig = plt.figure(1, figsize=(6, 8))
     for i_subf, r_dur in enumerate(l_duration, start=1):
         l_dur = {'red': r_dur, 'green': r_dur, 'yellow': env.light_duration['yellow']}
         env.light_duration = l_dur
@@ -510,37 +530,71 @@ def av_diff_light_duration(l_duration):
     plt.xlim(xmin=0, xmax=MAX_EP_STEP)
     plt.ylim(ymin=0)
     plt.tight_layout()
-    plt.show()
+    if SAVE_FIG:
+        fig.savefig('./results/diff_light_duration%i.png' % model_n, format='png', dpi=500)
+        plt.close(fig)
+        print('saved diff_light_duration')
+    else:
+        plt.show()
 
 
-def plot_reward(parent_path):
-    data = []
-    for path, _, files in os.walk(parent_path):
-        for f in files:
-            if f.endswith('.npy'):
-                data.append(np.load(path+'/'+f))
-    rewards = np.vstack(data)
-    r_mean = np.mean(rewards, axis=0)
-    r_std = np.std(rewards, axis=0)
-    plt.fill_between(np.arange(len(r_mean)), r_mean+r_std, r_mean-r_std, facecolor='b', alpha=0.5)
-    plt.plot(r_mean, c='b')
-    # plt.errorbar(np.arange(len(r_mean)), r_mean, yerr=r_std, errorevery=50,
-    #              capsize=5)
-    plt.ylabel('Moving episode-reward')
-    plt.xlabel('Episode')
-    plt.show()
+def plot_reward(download, n_models):
+    import subprocess, signal, requests, shutil
+    import pandas as pd
+    tags = ['a_loss%2Factor_loss', 'c_loss%2Fcritic_loss', 'ep_reward']
+
+    if os.path.exists('./results/tensorboard/') and download:
+        shutil.rmtree('./results/tensorboard/')
+    if download:
+        pro = subprocess.Popen(["tensorboard", "--logdir", "log"])
+        os.makedirs('./results/tensorboard/', exist_ok=True)
+        for i in range(n_models):
+            for tag in tags:
+                response = requests.get('http://localhost:6006/data/plugin/scalars/scalars?run={}&tag={}&format=csv'.format(
+                    i, tag
+                ))
+                print(response.url)
+                data = response.content
+                with open('./results/tensorboard/%i-%s.csv' % (i, tag), 'wb') as f:
+                    f.write(data)
+        os.killpg(os.getpgid(pro.pid), signal.SIGTERM)
+
+    def moving_average(a, alpha):
+        res = np.empty_like(a, dtype=float)
+        for i in range(len(res)):
+            if i == 0:
+                res[i] = a[i]
+            else:
+                res[i] = alpha * res[i-1] + (1.-alpha) * a[i]
+        return res
+
+    for i in range(n_models):
+        ep_reward = pd.read_csv('./results/tensorboard/{}-ep_reward.csv'.format(i))
+        y = moving_average(ep_reward['Value'], alpha=0.6) * float(MAX_EP_STEP)
+        plt.plot(ep_reward['Step'], y)
+    plt.ylabel('Episode reward')
+    plt.xlabel('Learning step')
+    plt.xlim(xmin=0, xmax=ep_reward['Step'].max())
+    if SAVE_FIG:
+        plt.savefig('./results/reward.png', format='png', dpi=500)
+        print('saved reward')
+        plt.close(plt.gcf())
+    else:
+        plt.show()
+
 
 
 def plot_mix_traffic(av_rate):
+    rl = DDPG(
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
+        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
     env = Env(light_p=LIGHT_P, ave_h=DEFAULT_H, fix_start=True)
     fdx = env.feature_info["dx"]
     fdv = env.feature_info["dv"]
     fv = env.feature_info["v"]
     fd2l = env.feature_info["d2l"]
 
-    rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
-        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
     plt.figure(1, figsize=(6, 8))
     for i_subp, rate in enumerate(av_rate, start=1):
         av_mask = np.random.choice([True, False], 300, replace=True, p=[rate, 1-rate])
@@ -601,14 +655,16 @@ def plot_mix_traffic(av_rate):
     plt.xlim(xmin=0, xmax=MAX_EP_STEP)
     plt.ylim(ymin=0)
     plt.tight_layout()
-    plt.show()
+    if SAVE_FIG:
+        plt.savefig('./results/mix_traffic%i.png' % model_n, format='png', dpi=500)
+        print('saved mix_traffic')
+        plt.gcf().close()
+    else:
+        plt.show()
 
 
 def plot_demand_change(demand_change):
     env = Env(light_p=LIGHT_P, ave_h=demand_change[0], fix_start=True)
-    rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
-        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
     t = 0
     pos = np.zeros((300, MAX_EP_STEP), dtype=np.float32)
     pos[:] = pos.fill(np.nan)
@@ -657,17 +713,20 @@ def plot_demand_change(demand_change):
     plt.xlim(xmin=0, xmax=MAX_EP_STEP)
     plt.ylim(ymin=0)
     if SAVE_FIG:
-        plt.savefig('./results/diff_demand.png', format='png', dpi=500)
+        plt.savefig('./results/diff_demand%i.png' % model_n, format='png', dpi=500)
+        print('saved diff_demand')
+        plt.gcf().close()
     else:
         plt.show()
 
 
 def plot_xiaobo_demo1(ave_flow, nec):
+    rl = DDPG(
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
+        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
     env = Env(light_p=LIGHT_P, ave_h=3600/ave_flow, fix_start=True)
     env.set_fps(2000)
-    rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
-        train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
     # av test
     av_pos, av_vel, av_acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
     # mv test
@@ -754,7 +813,8 @@ def plot_xiaobo_demo1(ave_flow, nec):
 
     plt.tight_layout(pad=0.2)
     if SAVE_FIG:
-        plt.savefig('./results/demo_car%i_car%i.png' % (nec[0], nec[1]), format='png', dpi=500)
+        plt.savefig('./results/demo_car%i_car%i_%i.png' % (nec[0], nec[1], model_n), format='png', dpi=500)
+        plt.gcf().close()
     else:
         plt.show()
 
@@ -1079,6 +1139,7 @@ def plot_xiaobo_demo2(ave_flow, nec, av_rate, drawing, save):
         plt.tight_layout(pad=0.2)
         if SAVE_FIG:
             plt.savefig('./results/demo3.png', format='png', dpi=500)
+            plt.gcf().close()
         else:
             plt.show()
 
@@ -1205,6 +1266,7 @@ def plot_xiaobo_draw2(ave_flow, nec, av_rate):
     plt.tight_layout(pad=0.2)
     if SAVE_FIG:
         plt.savefig('./results/demo2.png', format='png', dpi=500)
+        plt.gcf().close()
     else:
         plt.show()
 
@@ -1228,8 +1290,10 @@ def plot_xiaobo_draw3(ave_flow, nec, ave_h):
     env = Env(light_p=LIGHT_P, ave_h=ave_h, fix_start=True)
     env.set_fps(1000)
     rl = DDPG(
-        s_dim=env.state_dim, a_dim=env.action_dim, a_bound=env.action_bound,
+        s_dim=STATE_DIM, a_dim=ACTION_DIM, a_bound=ACTION_BOUND,
         train={'train': False, 'load_point': -1}, output_graph=False, model_dir=MODEL_DIR)
+    rl.reset()
+
     # av test
     av_pos, av_vel, av_acc, red_t, yellow_t = av_loop(rl, env, return_light=True)
     pos.append(av_pos)
@@ -1360,51 +1424,52 @@ def plot_xiaobo_draw3(ave_flow, nec, ave_h):
     plt.tight_layout(pad=0.2)
     if SAVE_FIG:
         plt.savefig('./results/demo3.png', format='png', dpi=500)
+        plt.gcf().close()
     else:
         plt.show()
 
 
-if __name__ == '__main__':
-    TRAJ_LW = 0.4
-    LIGHT_LW = 3
-    LIGHT_P = 1500
-    DEFAULT_H = 3.
-    MODEL_DIR = './tf_models/1'
-    MAX_EP_STEP = int(380 / ENV.dt)
-    SAVE_FIG = False
-    if len(sys.argv) > 1:
-        n = int(sys.argv[1])
-        if len(sys.argv) == 3:
-            MODEL_DIR = MODEL_DIR[:-1] + sys.argv[2]
-    else:
-        n = 2
-
+def choose_plot(plot_n):
     config = [
-        dict(fun=plot_av_mv,                # 0
-             kwargs={"ave_h": 3.}),    # 1500 veh/h
-        dict(fun=plot_av_diff_h,            # 1
-             kwargs={'h_list': [5., 4., 3.],}),
-        dict(fun=av_diff_light_duration,    # 2
-             kwargs={'l_duration': [35, 30, 25]}),
-        dict(fun=plot_reward,               # 3
-             kwargs={'parent_path': './tf_models'}),
-        dict(fun=plot_mix_traffic,          # 4
+        dict(fun=plot_av_mv,  # 0
+             kwargs={"ave_h": 3.}),  # 1500 veh/h
+        dict(fun=plot_av_diff_h,  # 1
+             kwargs={'h_list': [5., 4., 3.], }),
+        dict(fun=av_diff_light_duration,  # 2
+             kwargs={'l_duration': [45, 35, 25]}),
+        dict(fun=plot_reward,  # 3
+             kwargs={'download': False, 'n_models': 6}),
+        dict(fun=plot_mix_traffic,  # 4
              kwargs={'av_rate': np.arange(0, 1.1, 0.5)}),
-        dict(fun=plot_demand_change,        # 5
+        dict(fun=plot_demand_change,  # 5
              kwargs={'demand_change': [900, 1200, 1500]}),
-        dict(fun=plot_xiaobo_demo1,          # 6
+        dict(fun=plot_xiaobo_demo1,  # 6
              kwargs={'ave_flow': 1300, 'nec': [0, 29]}),
-        dict(fun=plot_xiaobo_demo2,          # 7
-             kwargs={'ave_flow': 1300, 'nec': 29, 'av_rate': 0.1, 'drawing': False, 'save':False},
+        dict(fun=plot_xiaobo_demo2,  # 7
+             kwargs={'ave_flow': 1300, 'nec': 29, 'av_rate': 0.1, 'drawing': False, 'save': False},
              ),
-        dict(fun=plot_xiaobo_draw2,          # 8
+        dict(fun=plot_xiaobo_draw2,  # 8
              kwargs={'ave_flow': 1300, 'nec': 29, 'av_rate': 0}
              ),
-        dict(fun=plot_xiaobo_draw3,          # 9
+        dict(fun=plot_xiaobo_draw3,  # 9
              kwargs={'ave_flow': 1300, 'nec': 29, 'ave_h': 2.7692}
              ),
-    ][n]
-
-    t0 = time.time()
+    ][plot_n]
     config['fun'](**config['kwargs'])
-    print(time.time()-t0)
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-m', '--model_n', type=int, nargs='+', default=[0], choices=range(6),
+                        help='The model number')
+    parser.add_argument('-p', '--plot_n', type=int, nargs='+', default=[1, 2], choices=range(10),
+                        help='The plot function number')
+    parser.add_argument('-o', '--output', action='store_true')
+    args = parser.parse_args()
+    for model_n in args.model_n:
+        MODEL_DIR = './tf_models/%s' % model_n
+        SAVE_FIG = args.output
+        for plot_n in args.plot_n:
+            t0 = time.time()
+            choose_plot(plot_n)
+            print(time.time()-t0)

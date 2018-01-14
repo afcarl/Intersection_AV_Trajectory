@@ -29,7 +29,6 @@ class DDPG(object):
         self.batch_size = batch_size
         self.train_ = train
         self.log_dir = log_dir
-        self.learn_counter = 0
         self.save_model_freq = 1000 if train.get('save_iter') is None else train['save_iter']
 
         self.memory_capacity = memory_capacity
@@ -67,14 +66,16 @@ class DDPG(object):
 
         c_loss, self.ISWeights, self.abs_errors = self._class_depended_graph(target_q, q)      # self.ISWeights and abs_loss is None here
 
+        self.global_step = tf.train.get_or_create_global_step()
         with tf.variable_scope('C_train'):
-            self.c_train_op = tf.train.RMSPropOptimizer(c_lr).minimize(c_loss, var_list=ce_params)
+            self.c_train_op = tf.train.RMSPropOptimizer(c_lr).minimize(c_loss, var_list=ce_params, global_step=self.global_step)
         with tf.variable_scope('a_loss'):
             policy_loss = -tf.reduce_mean(q)# - 0.01*tf.square(self.a))    # TODO: acceleration penalty
             tf.summary.scalar('actor_loss', policy_loss)
         with tf.variable_scope('A_train'):
             self.a_train_op = tf.train.RMSPropOptimizer(a_lr).minimize(policy_loss, var_list=ae_params)
 
+    def reset(self):
         self.sess = tf.Session()
         self.saver = tf.train.Saver(max_to_keep=100)
         if not self.train_['train']:
@@ -86,7 +87,7 @@ class DDPG(object):
         else:
             self.sess.run(tf.global_variables_initializer())
 
-        if output_graph:
+        if self.output_graph:
             if os.path.exists(self.log_dir):
                 shutil.rmtree(self.log_dir, ignore_errors=True)
             self.merged = tf.summary.merge_all()
@@ -102,14 +103,14 @@ class DDPG(object):
         with tf.variable_scope(scope):
             init_w = tf.truncated_normal_initializer(0., 0.1)
             init_b = tf.constant_initializer(0.1)
-            net = tf.layers.dense(s, 256, activation=tf.nn.relu,
+            net = tf.layers.dense(s, 128, activation=tf.nn.relu,
                                   kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l1')
             tf.summary.histogram('layer1', net)
-            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            net = tf.layers.dense(net, 128, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
-            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            net = tf.layers.dense(net, 128, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l3')
             tf.summary.histogram('layer3', net)
 
@@ -130,17 +131,17 @@ class DDPG(object):
             init_b = tf.constant_initializer(0.1)
 
             with tf.variable_scope('l1'):
-                n_l1 = 256
+                n_l1 = 128
                 w1_s = tf.get_variable('w1_s', [self.s_dim, n_l1], initializer=init_w, trainable=trainable)
                 w1_a = tf.get_variable('w1_a', [self.a_dim, n_l1], initializer=init_w, trainable=trainable)
                 b1 = tf.get_variable('b1', [1, n_l1], initializer=init_b, trainable=trainable)
                 net = tf.nn.relu(tf.matmul(s, w1_s) + tf.matmul(a, w1_a) + b1)
             tf.summary.histogram('layer1', net)
 
-            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            net = tf.layers.dense(net, 128, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l2')
             tf.summary.histogram('layer2', net)
-            net = tf.layers.dense(net, 256, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
+            net = tf.layers.dense(net, 128, tf.nn.relu, kernel_initializer=init_w, bias_initializer=init_b,
                                   trainable=trainable, name='l3')
             tf.summary.histogram('layer3', net)
             with tf.variable_scope('q'):
@@ -160,26 +161,28 @@ class DDPG(object):
         s, a, r, s_ = self.batch_holder['s'], self.batch_holder['a'], self.batch_holder['r'], self.batch_holder['s_']
 
         for ut in range(self.update_times):
-            self.learn_counter += 1
             bs, ba, br, bs_ = s[ut * self.batch_size: (ut + 1) * self.batch_size], \
                               a[ut * self.batch_size: (ut + 1) * self.batch_size], \
                               r[ut * self.batch_size: (ut + 1) * self.batch_size], \
                               s_[ut * self.batch_size: (ut + 1) * self.batch_size]
             self.sess.run(self.c_train_op, {self.S: bs, self.a: ba, self.R: br, self.S_: bs_})
             self.sess.run(self.a_train_op, {self.S: bs, self.R: br, self.S_: bs_})
-            self._record_learning(bs, ba, br, bs_)      # add summary and save ckpt
+            if hasattr(self, 'saver'):
+                self._record_learning(bs, ba, br, bs_)      # add summary and save ckpt
 
     def _record_learning(self, bs, ba, br, bs_, ISw=None):
-        if self.output_graph and self.learn_counter % self.save_model_freq == 0:
+        gs = self.sess.run(self.global_step)
+        if self.output_graph and gs % self.save_model_freq == 0:
             feed_dict = {self.S: bs, self.a: ba, self.R: br, self.S_: bs_, self.tfep_r: self.ep_r}
             if ISw is not None: feed_dict[self.ISWeights] = ISw
             merged = self.sess.run(self.merged, feed_dict)
-            self.writer.add_summary(merged, global_step=self.learn_counter)
+            self.writer.add_summary(merged, global_step=gs)
 
         if self.train_['save_iter'] is not None:
-            if self.learn_counter % self.train_['save_iter'] == 0:    # save model periodically
+            if gs % self.train_['save_iter'] == 0:    # save model periodically
                 ckpt_path = os.path.join(self.model_dir, 'DDPG.ckpt')
-                save_path = self.saver.save(self.sess, ckpt_path, global_step=self.learn_counter, write_meta_graph=False)
+                save_path = self.saver.save(self.sess, ckpt_path,
+                                            global_step=gs, write_meta_graph=False)
                 print("\nSave Model %s\n" % save_path)
 
     def threadlearn(self, stop_event):
@@ -219,7 +222,7 @@ class DDPG(object):
             shutil.rmtree(path)
         os.makedirs(path,)
         ckpt_path = os.path.join(path, 'DDPG.ckpt')
-        save_path = self.saver.save(self.sess, ckpt_path, global_step=self.learn_counter, write_meta_graph=False)
+        save_path = self.saver.save(self.sess, ckpt_path, global_step=self.global_step, write_meta_graph=False)
         print("\nSave Model %s\n" % save_path)
 
 
@@ -254,7 +257,6 @@ class DDPGPrioritizedReplay(DDPG):
     def learn(self, lock=None):   # batch update
         self.sess.run(self.update_target_op)  # soft update target
         for _ in range(self.update_times):
-            self.learn_counter += 1
             if lock is not None: lock.acquire()
             tree_idx, bt, ISWeights = self.memory.sample()
             abs_errors, _ = self.sess.run(

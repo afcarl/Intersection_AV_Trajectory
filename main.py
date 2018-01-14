@@ -6,18 +6,17 @@ import time, sys, subprocess, os, signal, platform
 import threading
 
 
-TOTAL_LEARN_STEP = 350000
+TOTAL_LEARN_STEP = 200000
 A_LR = 0.0001   # 0.0002
 C_LR = 0.0001    # 0.0005
-TAU = 0.001     # 0.005
-# what changed >>>>>>
-GAMMA = 0.92    # must small
+TAU = 0.002     # 0.005
+GAMMA = 0.9    # must small
 AVERAGE_H = None
 SAFE_T_GAP = 0.8    # no use for now
 RANDOM_LIGHT = True
 LIGHT_P = 1500
 MAX_CEP_STEP = 50
-MEMORY_CAPACITY = 500000  # should consist of several episodes
+MEMORY_CAPACITY = 1000000  # should consist of several episodes
 BATCH_SIZE = 64
 
 
@@ -28,7 +27,7 @@ LOAD_PATH = './tf_models/1'
 env = Env(light_p=LIGHT_P, ave_h=AVERAGE_H, random_light_dur=RANDOM_LIGHT, safe_t_gap=SAFE_T_GAP)
 crash_env = CrashEnv(light_p=LIGHT_P, safe_t_gap=SAFE_T_GAP)
 env.set_fps(1000)
-MAX_EP_STEP = int(200 / env.dt)
+MAX_EP_STEP = int(380 / env.dt)
 A_DIM = env.action_dim
 S_DIM = env.state_dim
 A_BOUND = env.action_bound
@@ -103,7 +102,7 @@ def twork(RL, n_val, lock=None, stop_event=None):
                     '| Ep_r: %.0f' % ep_r,
                     '| Var: %.3f' % var,
                     '| T100: %.2f' % measure100,
-                    '| LC: %i' % RL.learn_counter,
+                    '| LC: %i' % RL.sess.run(RL.global_step),
                     '%s' % ('| 1prio: %.2f' % (RL.memory.tree.total_p/RL.memory_capacity) if RL.__class__.__name__ != 'DDPG' else ''),
                 )
                 break
@@ -181,10 +180,13 @@ if __name__ == '__main__':
                 memory_capacity=MEMORY_CAPACITY, batch_size=BATCH_SIZE,
                 train=TRAIN, log_dir='log/%i' % i,
             )
+            RL.reset()
             RL = fill_memory(RL)
             if len(sys.argv) > 2:
                 if sys.argv[2] == 't':
                     pro = subprocess.Popen(["tensorboard", "--logdir", "log"])    # tensorboard
+                    # import webbrowser
+                    # webbrowser.open_new('http://localhost:6006/#scalars')
 
             if TRAIN["threading"]:
                 stop_event = threading.Event()
