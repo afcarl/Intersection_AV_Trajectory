@@ -1469,7 +1469,7 @@ if __name__ == '__main__':
     parser.add_argument('-o', '--output', action='store_true')
 
     args = parser.parse_args(
-        args='-m 0 -p 1'.split()
+        # args='-m 0 -p 1'.split()
     )
     for model_n in args.model_n:
         MODEL_DIR = './tf_models/%s' % model_n
